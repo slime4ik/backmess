@@ -217,10 +217,10 @@ func (u *UI) onChat(m hub.OutMsg) {
 	if replyToMe {
 		u.app.SendNotification(fyne.NewNotification(
 			m.From.Name+" ответил тебе · "+u.chanName(m.Ch), msgPreview(m)))
-		u.audio.Beep([]float64{880, 1175}, 0.07, 0.06)
+		u.audio.PlaySound(SoundReply, 0.8)
 	} else if !mine && m.Ch != u.curChan {
 		u.app.SendNotification(fyne.NewNotification(m.From.Name+" · "+u.chanName(m.Ch), msgPreview(m)))
-		u.audio.Beep([]float64{740}, 0.06, 0.05)
+		u.audio.PlaySound(SoundMessage, 0.55)
 	}
 	fyne.Do(func() {
 		if m.Ch != u.curChan {

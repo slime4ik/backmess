@@ -125,7 +125,7 @@ func (u *UI) showAudioSettings() {
 	}
 
 	test := widget.NewButton("проверить звук", func() {
-		u.audio.Beep([]float64{523, 659, 784}, 0.12, 0.16)
+		u.audio.PlaySound(SoundJoin, 0.7)
 	})
 
 	// Чувствительность — это порог, ниже которого микрофон не передаёт вообще.
@@ -251,10 +251,10 @@ func (u *UI) joinVoice(chID, name string) {
 
 	ev := VoiceEvents{
 		OnMemberJoin: func(m hub.MemberInfo) {
-			u.audio.Beep([]float64{392, 587}, 0.09, 0.10)
+			u.audio.PlaySound(SoundJoin, 0.7)
 		},
 		OnMemberLeave: func(id string) {
-			u.audio.Beep([]float64{587, 392}, 0.09, 0.10)
+			u.audio.PlaySound(SoundLeave, 0.8)
 		},
 		OnRTC: func(state string) {
 			fyne.Do(func() {
@@ -264,6 +264,9 @@ func (u *UI) joinVoice(chID, name string) {
 				switch state {
 				case "connected":
 					u.voiceStatus = "голос подключён"
+					// короткий синтезированный сигнал, а не звук-уведомление:
+					// это подтверждение своего действия, оно должно быть
+					// незаметным и не перебивать разговор
 					u.audio.Beep([]float64{523, 784}, 0.08, 0.10)
 				case "connecting", "new":
 					u.voiceStatus = "подключаюсь…"
@@ -351,6 +354,8 @@ func (u *UI) toggleDeaf() {
 }
 
 func (u *UI) applyAV() {
+	// мут дёргают постоянно, поэтому тут нарочно тихий щелчок, а не
+	// звук-уведомление: иначе он приестся за пять минут
 	u.audio.Beep([]float64{map[bool]float64{true: 233, false: 349}[u.muted]}, 0.05, 0.06)
 	if u.voice != nil {
 		u.voice.SetState(u.muted, u.deafened)
