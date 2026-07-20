@@ -1,0 +1,11 @@
+# Запуск сервера backmess на сервере: docker compose up -d --build
+# network_mode: host — чтобы UDP для WebRTC работал без плясок с NAT докера.
+services:
+  backmess:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

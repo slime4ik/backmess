@@ -1,0 +1,82 @@
+# Релизы по тегу vX.Y.Z: сервер (linux) + десктоп-клиент под три ОС.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      - name: build
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o mess-server-linux-amd64 ./cmd/backmess
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o mess-server-linux-arm64 ./cmd/backmess
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: mess-server-linux-*
+
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: mess-linux-amd64
+          - os: macos-latest
+            artifact: mess-macos-apple-silicon
+          - os: macos-13
+            artifact: mess-macos-intel
+          - os: windows-latest
+            artifact: mess-windows-amd64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+
+      - name: deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev xorg-dev libxkbcommon-dev libopus-dev pkg-config
+
+      - name: deps (macos)
+        if: runner.os == 'macOS'
+        run: brew install opus pkgconf || true
+
+      - name: deps (windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-opus mingw-w64-x86_64-pkg-config zip
+
+      - name: build (unix)
+        if: runner.os != 'Windows'
+        run: go build -tags nolibopusfile -ldflags="-s -w" -o ${{ matrix.artifact }} ./cmd/backmess-app
+
+      # -H windowsgui — чтобы при запуске не открывалось чёрное окно консоли.
+      # Рядом с exe кладём dll из MinGW: без них приложение не стартует.
+      - name: build (windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          export PATH="$PATH:/c/hostedtoolcache/windows/go/$(ls /c/hostedtoolcache/windows/go | head -1)/x64/bin"
+          CGO_ENABLED=1 go build -tags nolibopusfile -ldflags="-s -w -H windowsgui" -o mess.exe ./cmd/backmess-app
+          mkdir dist && cp mess.exe dist/
+          for dll in libopus-0.dll libwinpthread-1.dll libgcc_s_seh-1.dll; do
+            cp /mingw64/bin/$dll dist/ 2>/dev/null || true
+          done
+          cd dist && zip -r ../${{ matrix.artifact }} .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}

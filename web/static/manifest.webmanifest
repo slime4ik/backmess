@@ -1,0 +1,12 @@
+{
+  "name": "backmess",
+  "short_name": "backmess",
+  "description": "голосовалка для своих. ничего лишнего.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0E1116",
+  "theme_color": "#0E1116",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

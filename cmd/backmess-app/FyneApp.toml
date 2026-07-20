@@ -1,0 +1,12 @@
+Website = "https://discord.djaploy.dev"
+
+[Details]
+Name = "mess"
+ID = "dev.djaploy.mess"
+Version = "0.1.0"
+Build = 1
+
+[Migrations]
+# все обновления интерфейса у нас уже завёрнуты в fyne.Do — без этого флага
+# Fyne на каждом старте пишет в лог страшное предупреждение о threading model
+fyneDo = true
