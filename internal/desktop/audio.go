@@ -25,6 +25,10 @@ type AudioEngine struct {
 	capture  *malgo.Device
 	playback *malgo.Device
 
+	// выбранные устройства (пустая строка — системное по умолчанию)
+	captureName  string
+	playbackName string
+
 	enc    *opus.Encoder
 	micAcc []int16
 	encBuf []byte
@@ -74,36 +78,108 @@ func NewAudioEngine() (*AudioEngine, error) {
 	return e, nil
 }
 
+// Device — звуковое устройство для выпадающего списка в настройках.
+type Device struct {
+	Name    string
+	Default bool
+	id      malgo.DeviceID
+}
+
+// Devices перечисляет устройства: наушники втыкают и вытыкают постоянно,
+// и без возможности переключиться приложение становится бесполезным, если
+// система выбрала не то устройство.
+func (e *AudioEngine) Devices(capture bool) []Device {
+	kind := malgo.Playback
+	if capture {
+		kind = malgo.Capture
+	}
+	infos, err := e.ctx.Devices(kind)
+	if err != nil {
+		return nil
+	}
+	out := make([]Device, 0, len(infos))
+	for _, d := range infos {
+		out = append(out, Device{Name: d.Name(), Default: d.IsDefault != 0, id: d.ID})
+	}
+	return out
+}
+
+// findDevice ищет устройство по имени; пустое имя или пропажа железа —
+// возвращаем nil, что означает «системное по умолчанию».
+func (e *AudioEngine) findDevice(name string, capture bool) *malgo.DeviceID {
+	if name == "" {
+		return nil
+	}
+	for _, d := range e.Devices(capture) {
+		if d.Name == name {
+			id := d.id
+			return &id
+		}
+	}
+	return nil
+}
+
 // Start поднимает устройства. Ошибка захвата не фатальна (нет микрофона /
 // нет разрешения) — тогда работаем слушателем, о чём сообщаем наружу.
 func (e *AudioEngine) Start() (micOK bool, err error) {
-	pbCfg := malgo.DefaultDeviceConfig(malgo.Playback)
-	pbCfg.Playback.Format = malgo.FormatS16
-	pbCfg.Playback.Channels = 1
-	pbCfg.SampleRate = sampleRate
-	pb, err := malgo.InitDevice(e.ctx.Context, pbCfg, malgo.DeviceCallbacks{Data: e.onPlayback})
-	if err != nil {
-		return false, fmt.Errorf("плейбек: %w", err)
+	if err := e.StartPlayback(""); err != nil {
+		return false, err
 	}
-	if err := pb.Start(); err != nil {
-		return false, fmt.Errorf("плейбек: %w", err)
-	}
-	e.playback = pb
-
-	capCfg := malgo.DefaultDeviceConfig(malgo.Capture)
-	capCfg.Capture.Format = malgo.FormatS16
-	capCfg.Capture.Channels = 1
-	capCfg.SampleRate = sampleRate
-	cap, err := malgo.InitDevice(e.ctx.Context, capCfg, malgo.DeviceCallbacks{Data: e.onCapture})
-	if err != nil {
-		return false, nil
-	}
-	if err := cap.Start(); err != nil {
-		return false, nil
-	}
-	e.capture = cap
-	return true, nil
+	return e.StartCapture("") == nil, nil
 }
+
+// StartPlayback (пере)открывает вывод звука. Пустое имя — системное по умолчанию.
+func (e *AudioEngine) StartPlayback(name string) error {
+	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
+	cfg.Playback.Format = malgo.FormatS16
+	cfg.Playback.Channels = 1
+	cfg.SampleRate = sampleRate
+	if id := e.findDevice(name, false); id != nil {
+		cfg.Playback.DeviceID = id.Pointer()
+	}
+	dev, err := malgo.InitDevice(e.ctx.Context, cfg, malgo.DeviceCallbacks{Data: e.onPlayback})
+	if err != nil {
+		return fmt.Errorf("плейбек: %w", err)
+	}
+	if err := dev.Start(); err != nil {
+		dev.Uninit()
+		return fmt.Errorf("плейбек: %w", err)
+	}
+	if old := e.playback; old != nil {
+		old.Uninit()
+	}
+	e.playback = dev
+	e.playbackName = name
+	return nil
+}
+
+// StartCapture (пере)открывает микрофон. Пустое имя — системный по умолчанию.
+func (e *AudioEngine) StartCapture(name string) error {
+	cfg := malgo.DefaultDeviceConfig(malgo.Capture)
+	cfg.Capture.Format = malgo.FormatS16
+	cfg.Capture.Channels = 1
+	cfg.SampleRate = sampleRate
+	if id := e.findDevice(name, true); id != nil {
+		cfg.Capture.DeviceID = id.Pointer()
+	}
+	dev, err := malgo.InitDevice(e.ctx.Context, cfg, malgo.DeviceCallbacks{Data: e.onCapture})
+	if err != nil {
+		return err
+	}
+	if err := dev.Start(); err != nil {
+		dev.Uninit()
+		return err
+	}
+	if old := e.capture; old != nil {
+		old.Uninit()
+	}
+	e.capture = dev
+	e.captureName = name
+	return nil
+}
+
+func (e *AudioEngine) CaptureName() string  { return e.captureName }
+func (e *AudioEngine) PlaybackName() string { return e.playbackName }
 
 func (e *AudioEngine) Close() {
 	if e.capture != nil {

@@ -2,11 +2,13 @@ package desktop
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -20,10 +22,12 @@ func (u *UI) userPanel() fyne.CanvasObject {
 	u.btnMute.Importance = widget.LowImportance
 	u.btnDeaf = widget.NewButtonWithIcon("", theme.VolumeDownIcon(), func() { u.toggleDeaf() })
 	u.btnDeaf.Importance = widget.LowImportance
+	btnSettings := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() { u.showAudioSettings() })
+	btnSettings.Importance = widget.LowImportance
 
 	u.meBox = container.NewHBox()
 	panel := container.NewBorder(nil, nil, u.meBox,
-		container.NewHBox(u.btnMute, u.btnDeaf),
+		container.NewHBox(u.btnMute, u.btnDeaf, btnSettings),
 		container.NewCenter(u.ping.box),
 	)
 	return container.NewPadded(panel)
@@ -45,9 +49,98 @@ func (u *UI) renderMe() {
 	} else if u.muted {
 		sub = txt("микрофон выключен", colRed, 10, false)
 	}
-	u.meBox.Add(u.avatar(u.me, 30))
+	u.meBox.Add(u.avatarRing(u.me, 30, u.speaking[u.me.ID] && !u.muted))
 	u.meBox.Add(container.NewVBox(name, sub))
 	u.meBox.Refresh()
+}
+
+/* ---------- настройки звука ---------- */
+
+// showAudioSettings — выбор микрофона и наушников. Без этого, если система
+// выбрала не то устройство, починить это изнутри приложения было нельзя.
+func (u *UI) showAudioSettings() {
+	mics := u.audio.Devices(true)
+	outs := u.audio.Devices(false)
+
+	const auto = "по умолчанию (система)"
+	names := func(ds []Device) []string {
+		out := []string{auto}
+		for _, d := range ds {
+			n := d.Name
+			if d.Default {
+				n += " ★"
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	// со звёздочкой показываем, но храним и передаём чистое имя
+	clean := func(s string) string {
+		if s == auto {
+			return ""
+		}
+		return strings.TrimSuffix(s, " ★")
+	}
+	pick := func(cur string, ds []Device) string {
+		for _, d := range ds {
+			if d.Name == cur {
+				if d.Default {
+					return d.Name + " ★"
+				}
+				return d.Name
+			}
+		}
+		return auto
+	}
+
+	micSel := widget.NewSelect(names(mics), nil)
+	micSel.SetSelected(pick(u.audio.CaptureName(), mics))
+	outSel := widget.NewSelect(names(outs), nil)
+	outSel.SetSelected(pick(u.audio.PlaybackName(), outs))
+
+	status := txt("", colDim, 11, false)
+
+	micSel.OnChanged = func(s string) {
+		name := clean(s)
+		if err := u.audio.StartCapture(name); err != nil {
+			status.Text = "микрофон не открылся: " + err.Error()
+			status.Color = colRed
+			u.micOK = false
+		} else {
+			status.Text = "микрофон переключён"
+			status.Color = colGreen
+			u.micOK = true
+			u.app.Preferences().SetString("mic", name)
+		}
+		status.Refresh()
+	}
+	outSel.OnChanged = func(s string) {
+		name := clean(s)
+		if err := u.audio.StartPlayback(name); err != nil {
+			status.Text = "вывод не открылся: " + err.Error()
+			status.Color = colRed
+		} else {
+			status.Text = "вывод переключён"
+			status.Color = colGreen
+			u.app.Preferences().SetString("out", name)
+		}
+		status.Refresh()
+	}
+
+	test := widget.NewButton("проверить звук", func() {
+		u.audio.Beep([]float64{523, 659, 784}, 0.12, 0.16)
+	})
+
+	content := container.NewVBox(
+		txt("МИКРОФОН", colDim, 11, true), micSel,
+		txt("НАУШНИКИ / ДИНАМИКИ", colDim, 11, true), outSel,
+		test,
+		status,
+		txt("если воткнул наушники после запуска — выбери их тут", colDim, 10, false),
+	)
+	d := dialog.NewCustom("звук", "закрыть", content, u.win)
+	d.Resize(fyne.NewSize(420, 340))
+	d.Show()
 }
 
 /* ---------- панель голосового подключения ---------- */

@@ -113,12 +113,14 @@ func Run() {
 		return
 	}
 	u.audio = audio
-	u.micOK, err = audio.Start()
-	if err != nil {
+	// устройства, выбранные в прошлый раз; если их выдернули — молча
+	// откатываемся на системные по умолчанию
+	if err := audio.StartPlayback(a.Preferences().String("out")); err != nil {
 		w.SetContent(container.NewCenter(widget.NewLabel("звук не завёлся: " + err.Error())))
 		w.ShowAndRun()
 		return
 	}
+	u.micOK = audio.StartCapture(a.Preferences().String("mic")) == nil
 
 	// сохранённая сессия? — продлеваем через /api/refresh, а не просто /api/me,
 	// чтобы токен не протухал, пока юзер время от времени запускает приложение

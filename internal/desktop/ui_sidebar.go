@@ -236,15 +236,16 @@ func (u *UI) channelRow(g hub.GroupView, c *channelRef) fyne.CanvasObject {
 }
 
 // voiceMemberRow — участник внутри голосового канала: аватарка, ник и
-// значки мута/глухоты. Говорящего подсвечиваем зелёным.
+// значки мута/глухоты. Говорящего обводим зелёным кольцом.
 func (u *UI) voiceMemberRow(vm hub.VoiceMember) fyne.CanvasObject {
+	speaking := u.speaking[vm.User.ID] && !vm.State.Muted
 	nameCol := colDim
-	if u.speaking[vm.User.ID] {
+	if speaking {
 		nameCol = colSpeak
 	}
 	line := container.NewHBox(
-		sized(14, 14, canvas.NewRectangle(color.Transparent)), // отступ вложенности
-		u.avatar(vm.User, 18),
+		sized(10, 14, canvas.NewRectangle(color.Transparent)), // отступ вложенности
+		u.avatarRing(vm.User, 20, speaking),
 		txt(vm.User.Name, nameCol, 12, false),
 	)
 	if vm.State.Deafened {
@@ -499,16 +500,17 @@ func (u *UI) renderMembers() {
 			if e.online != want {
 				continue
 			}
+			speaking := u.speaking[e.user.ID]
 			nameCol := colText
 			if !e.online {
 				nameCol = colOffline
 			}
-			if u.speaking[e.user.ID] {
+			if speaking {
 				nameCol = colSpeak
 			}
 			name := txt(e.user.Name, nameCol, 13, false)
 			row := container.NewHBox(
-				u.avatar(e.user, 24),
+				u.avatarRing(e.user, 24, speaking),
 				container.NewVBox(name),
 				statusDot(e.online, 8),
 			)

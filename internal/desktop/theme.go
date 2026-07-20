@@ -254,6 +254,13 @@ func (c *avatarCache) fetch(url string, done func(fyne.Resource)) {
 // avatar — кружок с аватаркой юзера; пока картинка не приехала (или её нет,
 // как у гостей) — цветной круг с первой буквой ника.
 func (u *UI) avatar(user auth.User, size float32) fyne.CanvasObject {
+	return u.avatarRing(user, size, false)
+}
+
+// avatarRing — то же, но с зелёным кольцом, когда человек говорит. Именно
+// кольцо вокруг аватарки читается мгновенно; одного лишь подкрашивания ника
+// на глаз не хватало — непонятно, кто сейчас говорит.
+func (u *UI) avatarRing(user auth.User, size float32, speaking bool) fyne.CanvasObject {
 	initial := "?"
 	if r := []rune(strings.TrimSpace(user.Name)); len(r) > 0 {
 		initial = strings.ToUpper(string(r[0]))
@@ -263,7 +270,6 @@ func (u *UI) avatar(user auth.User, size float32) fyne.CanvasObject {
 	letter.Alignment = fyne.TextAlignCenter
 
 	stack := container.NewStack(circle, container.NewCenter(letter))
-	holder := container.New(&fixedSize{w: size, h: size}, stack)
 
 	if user.Avatar != "" {
 		img := canvas.NewImageFromResource(nil)
@@ -275,7 +281,21 @@ func (u *UI) avatar(user auth.User, size float32) fyne.CanvasObject {
 			stack.Refresh()
 		})
 	}
-	return holder
+
+	// кольцо рисуем всегда, но прозрачным, когда человек молчит: так размер
+	// строки не скачет в момент, когда он начинает говорить
+	const pad = 3
+	ring := canvas.NewCircle(color.Transparent)
+	ring.StrokeWidth = 2.5
+	ring.StrokeColor = color.Transparent
+	if speaking {
+		ring.StrokeColor = colSpeak
+	}
+	outer := size + pad*2
+	return container.New(&fixedSize{w: outer, h: outer},
+		ring,
+		container.NewCenter(container.New(&fixedSize{w: size, h: size}, stack)),
+	)
 }
 
 // fixedSize — жёсткий размер (аватарки, иконки, индикаторы).
