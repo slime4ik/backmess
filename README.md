@@ -82,6 +82,30 @@ docker compose up -d --build
 `/ws` — не забыть `Upgrade`/`Connection` заголовки для вебсокета).
 Порты 80/443 и другие сайты (сам djaploy) остаются как есть, не трогаются.
 
+### Как это развёрнуто сейчас (discord.djaploy.dev)
+
+Режим Б, рядом с проектом djaploy на том же сервере:
+
+- mess — systemd-сервис `mess`, бинарь `/home/dj/mess/mess-server`, конфиг
+  `/home/dj/mess/.env`, данные `/home/dj/mess/data`.
+- Слушает `172.18.0.1:8091` — это адрес docker-моста, то есть снаружи порт
+  недоступен, достучаться может только Caddy. Публично торчит лишь медиа-порт
+  8443, которому это и положено.
+- TLS и маршрутизацию делает Caddy из djaploy: в его `Caddyfile` добавлен блок
+  `discord.djaploy.dev` с `reverse_proxy 172.18.0.1:8091`. Порты 80/443 и сам
+  djaploy не тронуты.
+
+Обновить сервер после изменений в коде:
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o mess-server ./cmd/backmess
+scp mess-server dj@144.31.168.88:/home/dj/mess/mess-server.new
+ssh dj@144.31.168.88 'mv /home/dj/mess/mess-server.new /home/dj/mess/mess-server \
+  && chmod +x /home/dj/mess/mess-server && sudo systemctl restart mess'
+```
+
+Посмотреть логи: `ssh dj@144.31.168.88 'journalctl -u mess -f'`.
+
 В обоих режимах отдельно, напрямую в интернет (WebRTC не проксируется):
 **MEDIA_PORT (по умолчанию 8443) UDP+TCP** — открыть в файрволе. TURN не
 нужен: сервер сам является медиа-узлом с публичным IP. Важно, чтобы этот
