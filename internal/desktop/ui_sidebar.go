@@ -23,7 +23,9 @@ func (u *UI) buildShell() {
 	u.railBox = container.NewVBox()
 	u.chanBox = container.NewVBox()
 	u.membersBox = container.NewVBox()
-	u.msgsBox = container.NewVBox()
+	// плотная лента: штатный VBox добавляет отступ между каждой парой
+	// сообщений, из-за чего чат выглядел разреженным
+	u.msgsBox = container.New(&tightVBox{spacing: 2})
 	u.msgScroll = container.NewVScroll(u.msgsBox)
 	u.ping = newPingBars()
 
@@ -272,17 +274,13 @@ func (u *UI) memberMenu(user auth.User, pos fyne.Position) {
 	}
 
 	cur := u.audio.UserVolume(user.ID)
-	val := txt(fmt.Sprintf("%d%%", cur), colText, 11, true)
-
-	sl := widget.NewSlider(0, 200)
-	sl.Step = 5
-	sl.Value = float64(cur)
-	sl.OnChanged = func(v float64) {
-		val.Text = fmt.Sprintf("%d%%", int(v))
-		val.Refresh()
-		u.audio.SetUserVolume(user.ID, int(v))
-		u.app.Preferences().SetInt("vol:"+user.ID, int(v))
-	}
+	volBox, sl := labeledSlider("ГРОМКОСТЬ", 0, 200, 5, float64(cur),
+		func(v float64) string { return fmt.Sprintf("%.0f%%", v) },
+		"тише", "громче",
+		func(v float64) {
+			u.audio.SetUserVolume(user.ID, int(v))
+			u.app.Preferences().SetInt("vol:"+user.ID, int(v))
+		})
 
 	var pop *widget.PopUp
 	reset := widget.NewButton("сброс", func() { sl.SetValue(100) })
@@ -299,13 +297,13 @@ func (u *UI) memberMenu(user auth.User, pos fyne.Position) {
 		container.NewBorder(nil, nil,
 			container.NewHBox(u.avatar(user, 22), txt(user.Name, colText, 12, true)),
 			closeBtn, nil),
-		container.NewBorder(nil, nil, txt("громкость", colDim, 11, false), val, nil),
-		sl,
+		volBox,
 		reset,
 	)
 	content := container.NewStack(bg, container.NewPadded(card))
-	pop = widget.NewPopUp(container.NewGridWrap(fyne.NewSize(240, 150), content), u.win.Canvas())
-	pop.ShowAtPosition(pos)
+	wrapped := container.NewGridWrap(fyne.NewSize(260, 190), content)
+	pop = widget.NewPopUp(wrapped, u.win.Canvas())
+	pop.ShowAtPosition(clampToCanvas(pos, wrapped.MinSize(), u.win.Canvas().Size()))
 }
 
 func (u *UI) addChannelButton(gid, kind string) *widget.Button {
@@ -351,7 +349,7 @@ func (u *UI) channelMenu(g hub.GroupView, c channelRef, pos fyne.Position) {
 			fyne.NewMenuItem("удалить", func() { u.deleteChannel(g.ID, c) }),
 		)
 	}
-	widget.ShowPopUpMenuAtPosition(fyne.NewMenu("", items...), u.win.Canvas(), pos)
+	u.showMenuAt(fyne.NewMenu("", items...), pos)
 }
 
 func (u *UI) renameChannelDialog(gid string, c channelRef) {
@@ -461,7 +459,7 @@ func (u *UI) groupMenu(g hub.GroupView, pos fyne.Position) {
 			}()
 		}))
 	}
-	widget.ShowPopUpMenuAtPosition(fyne.NewMenu("", items...), u.win.Canvas(), pos)
+	u.showMenuAt(fyne.NewMenu("", items...), pos)
 }
 
 /* ---------- создание/вступление в группу ---------- */

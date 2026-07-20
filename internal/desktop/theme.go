@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -144,7 +145,17 @@ type tapRow struct {
 	active      bool
 	hover       bool
 	bg          *canvas.Rectangle
+
+	// последний зажатый модификатор: Fyne не передаёт его в Tapped, поэтому
+	// запоминаем на нажатии кнопки мыши (нужно для shift-клика)
+	lastMod fyne.KeyModifier
 }
+
+func (r *tapRow) MouseDown(e *fynedesktop.MouseEvent) { r.lastMod = e.Modifier }
+func (r *tapRow) MouseUp(*fynedesktop.MouseEvent)     {}
+
+// ShiftHeld — был ли зажат Shift в момент последнего клика.
+func (r *tapRow) ShiftHeld() bool { return r.lastMod&fyne.KeyModifierShift != 0 }
 
 func newTapRow(content fyne.CanvasObject, onTap func()) *tapRow {
 	r := &tapRow{content: content, onTap: onTap, bg: canvas.NewRectangle(color.Transparent)}
@@ -473,4 +484,161 @@ func statusDot(online bool, size float32) fyne.CanvasObject {
 		c.FillColor = colGreen
 	}
 	return sized(size, size, c)
+}
+
+/* ---------- удержание наведения ---------- */
+
+// hoverGroup — общее состояние наведения для нескольких соседних виджетов.
+//
+// Нужен из-за особенности Fyne: как только курсор заходит на кнопку внутри
+// строки, сама строка получает MouseOut. Панелька действий пряталась, курсор
+// снова оказывался над строкой — и она мигала без остановки. Теперь считаем
+// наведение по всей группе и прячем с небольшой задержкой.
+type hoverGroup struct {
+	n     int
+	timer *time.Timer
+	apply func(bool)
+}
+
+func (h *hoverGroup) enter() {
+	h.n++
+	h.update()
+}
+
+func (h *hoverGroup) leave() {
+	h.n--
+	h.update()
+}
+
+func (h *hoverGroup) update() {
+	if h.timer != nil {
+		h.timer.Stop()
+		h.timer = nil
+	}
+	if h.n > 0 {
+		h.apply(true)
+		return
+	}
+	// задержка нужна на перескок курсора между строкой и кнопками
+	h.timer = time.AfterFunc(140*time.Millisecond, func() {
+		fyne.Do(func() {
+			if h.n <= 0 {
+				h.apply(false)
+			}
+		})
+	})
+}
+
+// hoverArea — прозрачная обёртка, которая только сообщает о наведении.
+type hoverArea struct {
+	widget.BaseWidget
+	content fyne.CanvasObject
+	on      func(bool)
+}
+
+func newHoverArea(content fyne.CanvasObject, on func(bool)) *hoverArea {
+	h := &hoverArea{content: content, on: on}
+	h.ExtendBaseWidget(h)
+	return h
+}
+
+func (h *hoverArea) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(h.content)
+}
+func (h *hoverArea) MouseIn(*fynedesktop.MouseEvent)    { h.on(true) }
+func (h *hoverArea) MouseOut()                          { h.on(false) }
+func (h *hoverArea) MouseMoved(*fynedesktop.MouseEvent) {}
+
+/* ---------- всплывающие меню ---------- */
+
+// showMenuAt открывает меню, следя, чтобы оно осталось в пределах окна.
+// Без этого меню по правому клику в правой колонке уезжало за край экрана.
+func (u *UI) showMenuAt(menu *fyne.Menu, pos fyne.Position) {
+	pm := widget.NewPopUpMenu(menu, u.win.Canvas())
+	pm.ShowAtPosition(clampToCanvas(pos, pm.MinSize(), u.win.Canvas().Size()))
+}
+
+func clampToCanvas(pos fyne.Position, size fyne.Size, canvas fyne.Size) fyne.Position {
+	const margin = 8
+	if pos.X+size.Width > canvas.Width-margin {
+		pos.X = canvas.Width - size.Width - margin
+	}
+	if pos.Y+size.Height > canvas.Height-margin {
+		pos.Y = canvas.Height - size.Height - margin
+	}
+	if pos.X < margin {
+		pos.X = margin
+	}
+	if pos.Y < margin {
+		pos.Y = margin
+	}
+	return pos
+}
+
+/* ---------- плотный вертикальный список ---------- */
+
+// tightVBox — вертикальная раскладка с маленьким и предсказуемым отступом.
+// Штатный VBox добавляет тему-отступ между каждой парой элементов, из-за чего
+// лента сообщений выглядела разреженной.
+type tightVBox struct{ spacing float32 }
+
+func (t *tightVBox) MinSize(objs []fyne.CanvasObject) fyne.Size {
+	w, h := float32(0), float32(0)
+	visible := 0
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		m := o.MinSize()
+		if m.Width > w {
+			w = m.Width
+		}
+		h += m.Height
+		visible++
+	}
+	if visible > 1 {
+		h += t.spacing * float32(visible-1)
+	}
+	return fyne.NewSize(w, h)
+}
+
+func (t *tightVBox) Layout(objs []fyne.CanvasObject, size fyne.Size) {
+	y := float32(0)
+	for _, o := range objs {
+		if !o.Visible() {
+			continue
+		}
+		h := o.MinSize().Height
+		o.Resize(fyne.NewSize(size.Width, h))
+		o.Move(fyne.NewPos(0, y))
+		y += h + t.spacing
+	}
+}
+
+/* ---------- ползунок с подписями ---------- */
+
+// labeledSlider — ползунок, по которому понятно, что он делает: заголовок,
+// текущее значение цифрой и подписи краёв. Голый Slider не объясняет ничего.
+func labeledSlider(title string, minV, maxV, step, val float64,
+	format func(float64) string, leftCap, rightCap string,
+	onChange func(float64)) (*fyne.Container, *widget.Slider) {
+
+	value := txt(format(val), colAmber, 12, true)
+	sl := widget.NewSlider(minV, maxV)
+	sl.Step = step
+	sl.Value = val
+	sl.OnChanged = func(v float64) {
+		value.Text = format(v)
+		value.Refresh()
+		onChange(v)
+	}
+	caps := container.NewBorder(nil, nil,
+		txt(leftCap, colDim, 10, false),
+		txt(rightCap, colDim, 10, false),
+		nil)
+	return container.NewVBox(
+		container.NewBorder(nil, nil, txt(title, colDim, 11, true), value, nil),
+		sl,
+		caps,
+	), sl
 }

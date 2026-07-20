@@ -258,7 +258,7 @@ func (u *UI) msgWidget(m hub.OutMsg) fyne.CanvasObject {
 	grouped := m.ReplyTo == 0 && m.From.ID == u.lastAuthor && m.TS-u.lastTS < 5*60*1000
 	u.lastAuthor, u.lastTS = m.From.ID, m.TS
 
-	body := container.NewVBox()
+	body := container.New(&tightVBox{spacing: 1})
 	if m.ReplyTo != 0 {
 		body.Add(u.quoteLine(m.ReplyTo))
 	}
@@ -274,32 +274,42 @@ func (u *UI) msgWidget(m hub.OutMsg) fyne.CanvasObject {
 	var content fyne.CanvasObject
 	if grouped {
 		// выравниваем по ширине аватарки, чтобы текст шёл ровной колонкой
-		content = container.NewBorder(nil, nil, sized(38, 1, canvas.NewRectangle(colMain)), nil, body)
+		content = container.NewBorder(nil, nil, sized(40, 1, canvas.NewRectangle(colMain)), nil, body)
 	} else {
 		head := container.NewHBox(
 			txt(m.From.Name, hexColor(m.From.Color.Hex), 13, true),
 			txt(time.UnixMilli(m.TS).Format("15:04"), colDim, 10, false),
 		)
 		content = container.NewBorder(nil, nil,
-			container.NewVBox(u.avatar(m.From, 32)), nil,
-			container.NewVBox(head, body),
+			container.NewVBox(u.avatar(m.From, 30)), nil,
+			container.New(&tightVBox{spacing: 1}, head, body),
 		)
 	}
 
 	// Панелька действий появляется при наведении на сообщение — как в Discord.
 	// Прятать «ответить» в правый клик неудобно: про него никто не догадывается.
-	actions := u.msgActions(m)
+	var row *tapRow
+	actions, group := u.msgActions(m, func() bool { return row != nil && row.ShiftHeld() })
 	actions.Hide()
 	overlay := container.NewBorder(
-		container.NewHBox(layoutSpacer(1), actions), nil, nil, nil, nil,
+		container.NewHBox(layoutSpacer(1), newHoverArea(actions, func(in bool) {
+			// наведение на сами кнопки тоже держит панель открытой, иначе она
+			// пряталась ровно в момент, когда до неё доводишь курсор
+			if in {
+				group.enter()
+			} else {
+				group.leave()
+			}
+		})),
+		nil, nil, nil, nil,
 	)
 
-	row := newTapRow(container.NewStack(container.NewPadded(content), overlay), nil)
+	row = newTapRow(container.NewStack(content, overlay), nil)
 	row.onHover = func(in bool) {
 		if in {
-			actions.Show()
+			group.enter()
 		} else {
-			actions.Hide()
+			group.leave()
 		}
 	}
 	row.onSecondary = func(pos fyne.Position) { u.msgMenu(m, pos) }
@@ -307,13 +317,14 @@ func (u *UI) msgWidget(m hub.OutMsg) fyne.CanvasObject {
 }
 
 // msgActions — кнопки над сообщением: ответить и (для своих) удалить.
-func (u *UI) msgActions(m hub.OutMsg) *fyne.Container {
+// shiftHeld позволяет удалить без подтверждения — привычка из Discord.
+func (u *UI) msgActions(m hub.OutMsg, shiftHeld func() bool) (*fyne.Container, *hoverGroup) {
 	bg := canvas.NewRectangle(colInput)
 	bg.CornerRadius = 6
 	bg.StrokeColor = colLine
 	bg.StrokeWidth = 1
 
-	reply := widget.NewButtonWithIcon("", theme.MailReplyIcon(), func() {
+	reply := widget.NewButtonWithIcon("", iconReply, func() {
 		u.replyTo = m.ID
 		u.renderReplyBar()
 		if u.chatEntry != nil {
@@ -325,19 +336,36 @@ func (u *UI) msgActions(m hub.OutMsg) *fyne.Container {
 
 	// удалять можно только свои сообщения — чужие не трогаем даже владельцу
 	if m.From.ID == u.me.ID {
-		del := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() { u.deleteMsg(m) })
+		del := widget.NewButtonWithIcon("", iconTrash, func() { u.deleteMsg(m, shiftHeld()) })
 		del.Importance = widget.LowImportance
 		btns.Add(del)
 	}
-	return container.NewStack(bg, btns)
+
+	box := container.NewStack(bg, btns)
+	group := &hoverGroup{}
+	group.apply = func(show bool) {
+		if show {
+			box.Show()
+		} else {
+			box.Hide()
+		}
+	}
+	return box, group
 }
 
-func (u *UI) deleteMsg(m hub.OutMsg) {
-	dialog.ShowConfirm("удалить сообщение?", shorten(msgPreview(m), 60), func(ok bool) {
-		if ok {
-			u.gw.DeleteMsg(m.Ch, m.ID)
-		}
-	}, u.win)
+// deleteMsg: с зажатым Shift удаляем сразу, без вопроса.
+func (u *UI) deleteMsg(m hub.OutMsg, skipConfirm bool) {
+	if skipConfirm {
+		u.gw.DeleteMsg(m.Ch, m.ID)
+		return
+	}
+	dialog.ShowConfirm("удалить сообщение?",
+		shorten(msgPreview(m), 60)+"\n\n(с зажатым Shift — сразу, без этого окна)",
+		func(ok bool) {
+			if ok {
+				u.gw.DeleteMsg(m.Ch, m.ID)
+			}
+		}, u.win)
 }
 
 // onMsgDeleted убирает сообщение из ленты. Проще перерисовать канал целиком:
@@ -393,7 +421,7 @@ func (u *UI) msgMenu(m hub.OutMsg, pos fyne.Position) {
 			u.showImage(u.api.AbsURL(m.Img))
 		}))
 	}
-	widget.ShowPopUpMenuAtPosition(fyne.NewMenu("", items...), u.win.Canvas(), pos)
+	u.showMenuAt(fyne.NewMenu("", items...), pos)
 }
 
 /* ---------- картинки ---------- */

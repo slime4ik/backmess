@@ -129,11 +129,8 @@ func (u *UI) showAudioSettings() {
 	})
 
 	// Чувствительность — это порог, ниже которого микрофон не передаёт вообще.
-	// Живая полоска рядом показывает текущий уровень: видно, где проходит
+	// Живая полоска под ним показывает текущий уровень: видно, где проходит
 	// дыхание и шум вентилятора, а где начинается собственно речь.
-	gate := widget.NewSlider(0, 30) // проценты от максимума; выше 30 уже режет речь
-	gate.Step = 1
-	gate.Value = u.audio.Gate() * 100
 	gateHint := txt("", colDim, 10, false)
 	setHint := func(v float64) {
 		switch {
@@ -148,12 +145,15 @@ func (u *UI) showAudioSettings() {
 		}
 		gateHint.Refresh()
 	}
-	setHint(gate.Value)
-	gate.OnChanged = func(v float64) {
-		u.audio.SetGate(v / 100)
-		u.app.Preferences().SetFloat("gate", v/100)
-		setHint(v)
-	}
+	gateBox, _ := labeledSlider("ПОРОГ ТИШИНЫ", 0, 30, 1, u.audio.Gate()*100,
+		func(v float64) string { return fmt.Sprintf("%.0f%%", v) },
+		"слышно всё", "только речь",
+		func(v float64) {
+			u.audio.SetGate(v / 100)
+			u.app.Preferences().SetFloat("gate", v/100)
+			setHint(v)
+		})
+	setHint(u.audio.Gate() * 100)
 
 	u.gateMeter = canvas.NewRectangle(colGreen)
 	u.gateMeter.CornerRadius = 2
@@ -166,9 +166,11 @@ func (u *UI) showAudioSettings() {
 		txt("МИКРОФОН", colDim, 11, true), micSel,
 		txt("НАУШНИКИ / ДИНАМИКИ", colDim, 11, true), outSel,
 		widget.NewSeparator(),
-		txt("ЧУВСТВИТЕЛЬНОСТЬ МИКРОФОНА", colDim, 11, true),
-		gate, gateHint,
+		gateBox,
+		gateHint,
+		txt("текущий уровень:", colDim, 10, false),
 		sized(0, 6, meter),
+		widget.NewSeparator(),
 		test,
 		status,
 		txt("если воткнул наушники после запуска — выбери их тут", colDim, 10, false),
