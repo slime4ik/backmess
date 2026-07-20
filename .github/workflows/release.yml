@@ -1,4 +1,10 @@
-# Релизы по тегу vX.Y.Z: сервер (linux) + десктоп-клиент под три ОС.
+# Релизы по тегу vX.Y.Z: сервер (linux) + десктоп-клиент под три системы.
+#
+# На выходе ровно три файла для людей:
+#   mess-macos.dmg          — универсальный (Apple Silicon + Intel), перетащить в Applications
+#   mess-windows-amd64.zip  — exe рядом с нужными dll
+#   mess-linux-amd64.tar.gz — бинарь + ярлык + install.sh
+# и отдельно бинари сервера для деплоя.
 name: release
 
 on:
@@ -23,50 +29,56 @@ jobs:
         with:
           files: mess-server-linux-*
 
-  app:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: mess-linux-amd64
-          - os: macos-latest
-            artifact: mess-macos-apple-silicon
-          - os: macos-13
-            artifact: mess-macos-intel
-          - os: windows-latest
-            artifact: mess-windows-amd64.zip
-    runs-on: ${{ matrix.os }}
+  # macOS собираем ТОЛЬКО на Apple Silicon и делаем universal-бинарь через lipo.
+  # Отдельный Intel-раннер (macos-13) не используем: их мало, задача часами
+  # висит в очереди, а результат тот же.
+  macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version: "1.26.x" }
+      - name: package
+        run: ./scripts/package-macos.sh "${GITHUB_REF_NAME#v}" mess-macos.dmg
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: mess-macos.dmg
 
-      - name: deps (linux)
-        if: runner.os == 'Linux'
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      # Набор взят из CI самой Fyne. Ключевой тут libwayland-dev: Fyne 2.8 без
+      # тега x11 собирает wayland-путь и требует wayland-client через
+      # pkg-config — именно из-за него падала сборка в v0.1.0.
+      - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev xorg-dev libxkbcommon-dev libopus-dev pkg-config
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libwayland-dev libx11-dev libxkbcommon-dev xorg-dev \
+            libopus-dev pkg-config
+      - name: package
+        run: ./scripts/package-linux.sh "${GITHUB_REF_NAME#v}" mess-linux-amd64.tar.gz
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: mess-linux-amd64.tar.gz
 
-      - name: deps (macos)
-        if: runner.os == 'macOS'
-        run: brew install opus pkgconf || true
-
-      - name: deps (windows)
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26.x" }
+      - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc mingw-w64-x86_64-opus mingw-w64-x86_64-pkg-config zip
-
-      - name: build (unix)
-        if: runner.os != 'Windows'
-        run: go build -tags nolibopusfile -ldflags="-s -w" -o ${{ matrix.artifact }} ./cmd/backmess-app
-
       # -H windowsgui — чтобы при запуске не открывалось чёрное окно консоли.
       # Рядом с exe кладём dll из MinGW: без них приложение не стартует.
-      - name: build (windows)
-        if: runner.os == 'Windows'
+      - name: package
         shell: msys2 {0}
         run: |
           export PATH="$PATH:/c/hostedtoolcache/windows/go/$(ls /c/hostedtoolcache/windows/go | head -1)/x64/bin"
@@ -75,8 +87,7 @@ jobs:
           for dll in libopus-0.dll libwinpthread-1.dll libgcc_s_seh-1.dll; do
             cp /mingw64/bin/$dll dist/ 2>/dev/null || true
           done
-          cd dist && zip -r ../${{ matrix.artifact }} .
-
+          cd dist && zip -r ../mess-windows-amd64.zip .
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
+          files: mess-windows-amd64.zip

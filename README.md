@@ -143,19 +143,32 @@ make app   # или: go build -tags nolibopusfile ./cmd/backmess-app
 
 ### Как друзьям это запустить
 
-- **Windows**: скачать `mess-windows-amd64.zip`, распаковать целиком и
-  запустить `mess.exe`. Dll рядом с ним нужны — из папки не вынимать.
-- **macOS**: скачать `mess-macos-apple-silicon` (или `-intel`), затем в
-  терминале снять карантин, иначе Gatekeeper не даст запустить неподписанное
-  приложение:
+В релизе три файла — по одному на систему.
+
+- **Windows** — `mess-windows-amd64.zip`: распаковать целиком, запустить
+  `mess.exe`. Dll рядом с ним нужны, из папки не вынимать.
+- **macOS** — `mess-macos.dmg`: открыть, перетащить mess в Applications.
+  Один файл на любой мак: внутри универсальный бинарь (Apple Silicon + Intel).
+  При первом запуске система ругнётся, что приложение от неизвестного
+  разработчика — надо **правой кнопкой по mess → «Открыть»**, и подтвердить.
+  Через обычный двойной клик не пустит. Если система совсем упирается:
   ```bash
-  chmod +x ~/Downloads/mess-macos-apple-silicon
-  xattr -d com.apple.quarantine ~/Downloads/mess-macos-apple-silicon
+  xattr -dr com.apple.quarantine /Applications/mess.app
   ```
-- **Linux**: `chmod +x mess-linux-amd64 && ./mess-linux-amd64`.
+- **Linux** — `mess-linux-amd64.tar.gz`: распаковать, запустить `./mess`,
+  либо `./install.sh` — тогда появится в меню приложений с иконкой.
 
 Подписи и нотаризации нет (это $99/год Apple Developer), поэтому на маке
-разовый ручной шаг обязателен.
+разовый ручной шаг обязателен. Приложение подписано ad-hoc — этого хватает,
+чтобы оно вообще запускалось на Apple Silicon, но Gatekeeper всё равно
+попросит подтверждение.
+
+Собрать пакеты локально можно теми же скриптами, что использует CI:
+
+```bash
+./scripts/package-macos.sh 0.1.0 mess-macos.dmg
+./scripts/package-linux.sh 0.1.0 mess-linux-amd64.tar.gz
+```
 
 Пока рекомендуются **наушники**: программного эхоподавления в нативном
 клиенте ещё нет.
