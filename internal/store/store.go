@@ -79,11 +79,12 @@ func (g *Group) clone() *Group {
 
 // Msg — сообщение чата. Автор хранится по id, профиль подтягивается из Users.
 type Msg struct {
-	ID   int64  `json:"id"`
-	From string `json:"from"`
-	Text string `json:"text,omitempty"`
-	Img  string `json:"img,omitempty"`
-	TS   int64  `json:"ts"` // unix millis
+	ID      int64  `json:"id"`
+	From    string `json:"from"`
+	Text    string `json:"text,omitempty"`
+	Img     string `json:"img,omitempty"`
+	TS      int64  `json:"ts"`                // unix millis
+	ReplyTo int64  `json:"replyTo,omitempty"` // id сообщения, на которое отвечают
 }
 
 type state struct {
@@ -470,12 +471,25 @@ func (s *Store) ChannelGroup(chid string) (*Group, *Channel, bool) {
 
 /* ---------- сообщения ---------- */
 
-func (s *Store) AddMsg(chid string, from auth.User, text, img string) Msg {
+func (s *Store) AddMsg(chid string, from auth.User, text, img string, replyTo int64) Msg {
 	s.SaveUser(from)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// ссылаться можно только на сообщение из этого же канала
+	if replyTo != 0 {
+		ok := false
+		for _, h := range s.s.Msgs[chid] {
+			if h.ID == replyTo {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			replyTo = 0
+		}
+	}
 	s.s.Seq++
-	m := Msg{ID: s.s.Seq, From: from.ID, Text: text, Img: img, TS: time.Now().UnixMilli()}
+	m := Msg{ID: s.s.Seq, From: from.ID, Text: text, Img: img, TS: time.Now().UnixMilli(), ReplyTo: replyTo}
 	h := append(s.s.Msgs[chid], m)
 	if len(h) > HistoryCap {
 		h = h[len(h)-HistoryCap:]
@@ -483,6 +497,33 @@ func (s *Store) AddMsg(chid string, from auth.User, text, img string) Msg {
 	s.s.Msgs[chid] = h
 	s.touch()
 	return m
+}
+
+// DeleteMsg удаляет сообщение. Удалить можно только своё — чужое трогать
+// нельзя, даже владельцу группы: это переписка, а не модерация.
+func (s *Store) DeleteMsg(chid string, id int64, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.s.Msgs[chid]
+	for i, m := range h {
+		if m.ID != id {
+			continue
+		}
+		if m.From != userID {
+			return ErrForbidden
+		}
+		s.s.Msgs[chid] = append(h[:i], h[i+1:]...)
+		// ответы на удалённое оставляем, но ссылку гасим, иначе в цитате
+		// висело бы «недоступно»
+		for j := range s.s.Msgs[chid] {
+			if s.s.Msgs[chid][j].ReplyTo == id {
+				s.s.Msgs[chid][j].ReplyTo = 0
+			}
+		}
+		s.touch()
+		return nil
+	}
+	return ErrNotFound
 }
 
 func (s *Store) History(chid string) []Msg {

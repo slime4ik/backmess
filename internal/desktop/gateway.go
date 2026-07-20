@@ -22,6 +22,7 @@ type GatewayEvents struct {
 	OnVoice     func(chID string, members []hub.VoiceMember)
 	OnChat      func(hub.OutMsg)
 	OnHistory   func(chID string, msgs []hub.OutMsg)
+	OnMsgDelete func(chID string, id int64)
 	OnPing      func(ms int)
 	OnLink      func(up bool) // связь с сервером есть/нет
 }
@@ -162,6 +163,14 @@ func (g *Gateway) dispatch(raw map[string]json.RawMessage) {
 		if g.ev.OnHistory != nil {
 			g.ev.OnHistory(ch, msgs)
 		}
+	case "msg-deleted":
+		var ch string
+		var id int64
+		get("ch", &ch)
+		get("id", &id)
+		if g.ev.OnMsgDelete != nil {
+			g.ev.OnMsgDelete(ch, id)
+		}
 	case "pong":
 		var ts int64
 		if get("ts", &ts) && ts > 0 {
@@ -205,8 +214,12 @@ func (g *Gateway) RequestHistory(chID string) {
 	g.send(map[string]any{"t": "history", "ch": chID})
 }
 
-func (g *Gateway) SendChat(chID, text, img string) {
-	g.send(map[string]any{"t": "chat", "ch": chID, "text": text, "img": img})
+func (g *Gateway) SendChat(chID, text, img string, replyTo int64) {
+	g.send(map[string]any{"t": "chat", "ch": chID, "text": text, "img": img, "replyTo": replyTo})
+}
+
+func (g *Gateway) DeleteMsg(chID string, id int64) {
+	g.send(map[string]any{"t": "delete", "ch": chID, "id": id})
 }
 
 func (g *Gateway) Close() {

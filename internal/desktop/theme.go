@@ -140,6 +140,7 @@ type tapRow struct {
 	content     fyne.CanvasObject
 	onTap       func()
 	onSecondary func(fyne.Position)
+	onHover     func(bool)
 	active      bool
 	hover       bool
 	bg          *canvas.Rectangle
@@ -188,79 +189,169 @@ func (r *tapRow) TappedSecondary(e *fyne.PointEvent) {
 	}
 }
 
-func (r *tapRow) MouseIn(*fynedesktop.MouseEvent)    { r.hover = true; r.applyBG() }
-func (r *tapRow) MouseOut()                          { r.hover = false; r.applyBG() }
+func (r *tapRow) MouseIn(*fynedesktop.MouseEvent) {
+	r.hover = true
+	r.applyBG()
+	if r.onHover != nil {
+		r.onHover(true)
+	}
+}
+
+func (r *tapRow) MouseOut() {
+	r.hover = false
+	r.applyBG()
+	if r.onHover != nil {
+		r.onHover(false)
+	}
+}
 func (r *tapRow) MouseMoved(*fynedesktop.MouseEvent) {}
 func (r *tapRow) Cursor() fynedesktop.Cursor         { return fynedesktop.PointerCursor }
 
 /* ---------- аватарки ---------- */
 
-// avatarCache держит уже скачанные картинки: аватарки повторяются в каждом
-// сообщении, качать их заново на каждую строку — гарантированные тормоза.
-type avatarCache struct {
-	mu   sync.Mutex
-	data map[string]fyne.Resource
-	busy map[string]bool
-	api  *API
+// imageCache — скачанные картинки с ограничением по объёму.
+//
+// Кэш обязателен: аватарка повторяется в каждом сообщении, качать её заново на
+// каждую строку — гарантированные тормоза. Но безразмерный кэш был причиной
+// раздутой памяти: полноразмерные картинки чата (до 1600px) держались
+// декодированными вечно. Теперь размер ограничен, а лишнее вытесняется по
+// давности использования.
+type imageCache struct {
+	mu    sync.Mutex
+	data  map[string]*cacheEntry
+	busy  map[string]bool
+	bytes int
+	limit int
+	tick  int64
+	api   *API
 }
 
-func newAvatarCache(api *API) *avatarCache {
-	return &avatarCache{data: map[string]fyne.Resource{}, busy: map[string]bool{}, api: api}
+type cacheEntry struct {
+	res  fyne.Resource
+	size int
+	used int64
 }
 
-func (c *avatarCache) get(url string) (fyne.Resource, bool) {
+func newImageCache(api *API, limitMB int) *imageCache {
+	return &imageCache{
+		data:  map[string]*cacheEntry{},
+		busy:  map[string]bool{},
+		limit: limitMB << 20,
+		api:   api,
+	}
+}
+
+func (c *imageCache) get(key string) (fyne.Resource, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	r, ok := c.data[url]
-	return r, ok
+	e, ok := c.data[key]
+	if !ok {
+		return nil, false
+	}
+	c.tick++
+	e.used = c.tick
+	return e.res, true
 }
 
-// fetch скачивает картинку и зовёт done в UI-потоке (через fyne.Do у вызывающего).
-func (c *avatarCache) fetch(url string, done func(fyne.Resource)) {
+func (c *imageCache) put(key string, res fyne.Resource) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	size := len(res.Content())
+	if old, ok := c.data[key]; ok {
+		c.bytes -= old.size
+	}
+	c.tick++
+	c.data[key] = &cacheEntry{res: res, size: size, used: c.tick}
+	c.bytes += size
+	// вытесняем самые давно не использованные, пока не влезем в лимит
+	for c.bytes > c.limit && len(c.data) > 1 {
+		var oldestKey string
+		var oldest int64 = 1<<62 - 1
+		for k, e := range c.data {
+			if e.used < oldest {
+				oldest, oldestKey = e.used, k
+			}
+		}
+		c.bytes -= c.data[oldestKey].size
+		delete(c.data, oldestKey)
+	}
+}
+
+// fetch отдаёт картинку из кэша либо качает. transform применяется один раз к
+// сырым байтам — так мы храним уже уменьшенную версию, а не оригинал.
+func (c *imageCache) fetch(url, key string, transform func([]byte) []byte, done func(fyne.Resource)) {
 	if url == "" {
 		return
 	}
-	if r, ok := c.get(url); ok {
+	if key == "" {
+		key = url
+	}
+	if r, ok := c.get(key); ok {
 		done(r)
 		return
 	}
 	c.mu.Lock()
-	if c.busy[url] {
+	if c.busy[key] {
 		c.mu.Unlock()
 		return
 	}
-	c.busy[url] = true
+	c.busy[key] = true
 	c.mu.Unlock()
 
 	go func() {
+		defer func() {
+			c.mu.Lock()
+			delete(c.busy, key)
+			c.mu.Unlock()
+		}()
 		resp, err := c.api.hc.Get(url)
 		if err != nil {
 			return
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 25<<20))
 		if err != nil {
 			return
 		}
-		res := fyne.NewStaticResource(url, b)
-		c.mu.Lock()
-		c.data[url] = res
-		delete(c.busy, url)
-		c.mu.Unlock()
+		if transform != nil {
+			if t := transform(b); t != nil {
+				b = t
+			}
+		}
+		res := fyne.NewStaticResource(key, b)
+		c.put(key, res)
 		fyne.Do(func() { done(res) })
 	}()
 }
 
-// avatar — кружок с аватаркой юзера; пока картинка не приехала (или её нет,
-// как у гостей) — цветной круг с первой буквой ника.
-func (u *UI) avatar(user auth.User, size float32) fyne.CanvasObject {
-	return u.avatarRing(user, size, false)
+// avatarView — аватарка с кольцом «говорит». Держим ссылку на кольцо, чтобы
+// анимировать его, НЕ пересобирая виджеты: перестройка всего списка по 7 раз
+// в секунду была заметной статьёй расхода процессора.
+type avatarView struct {
+	obj  fyne.CanvasObject
+	ring *canvas.Circle
+	lit  bool
 }
 
-// avatarRing — то же, но с зелёным кольцом, когда человек говорит. Именно
-// кольцо вокруг аватарки читается мгновенно; одного лишь подкрашивания ника
-// на глаз не хватало — непонятно, кто сейчас говорит.
-func (u *UI) avatarRing(user auth.User, size float32, speaking bool) fyne.CanvasObject {
+// setSpeaking: кольцо вокруг аватарки отключено по требованию — говорящего
+// теперь показывает только подсветка ника. Заготовка оставлена, чтобы вернуть
+// кольцо было делом одной строки, если решат иначе.
+func (a *avatarView) setSpeaking(on bool, level float64) {
+	_ = level
+	if a.lit == on {
+		return
+	}
+	a.lit = on
+}
+
+func (u *UI) avatar(user auth.User, size float32) fyne.CanvasObject {
+	return u.avatarView(user, size).obj
+}
+
+// avatarView строит круглую аватарку. Круг настоящий: картинку обрезаем по
+// маске при загрузке, потому что Fyne обрезать по форме не умеет, а квадратные
+// аватарки в списке выглядят чужеродно.
+func (u *UI) avatarView(user auth.User, size float32) *avatarView {
 	initial := "?"
 	if r := []rune(strings.TrimSpace(user.Name)); len(r) > 0 {
 		initial = strings.ToUpper(string(r[0]))
@@ -268,34 +359,36 @@ func (u *UI) avatarRing(user auth.User, size float32, speaking bool) fyne.Canvas
 	circle := canvas.NewCircle(hexColor(user.Color.Hex))
 	letter := txt(initial, color.NRGBA{0x11, 0x14, 0x18, 0xFF}, size*0.5, true)
 	letter.Alignment = fyne.TextAlignCenter
-
 	stack := container.NewStack(circle, container.NewCenter(letter))
 
 	if user.Avatar != "" {
+		px := int(size * 3) // с запасом под retina
 		img := canvas.NewImageFromResource(nil)
 		img.FillMode = canvas.ImageFillContain
-		u.avatars.fetch(user.Avatar, func(res fyne.Resource) {
-			img.Resource = res
-			img.Refresh()
-			stack.Objects = []fyne.CanvasObject{img}
-			stack.Refresh()
-		})
+		key := fmt.Sprintf("%s|circle%d", user.Avatar, px)
+		u.images.fetch(user.Avatar, key,
+			func(raw []byte) []byte { return circleAvatar(raw, px) },
+			func(res fyne.Resource) {
+				img.Resource = res
+				img.Refresh()
+				stack.Objects = []fyne.CanvasObject{img}
+				stack.Refresh()
+			})
 	}
 
-	// кольцо рисуем всегда, но прозрачным, когда человек молчит: так размер
-	// строки не скачет в момент, когда он начинает говорить
+	// кольцо есть всегда, но прозрачное, когда человек молчит: иначе строка
+	// дёргалась бы в момент начала речи
 	const pad = 3
 	ring := canvas.NewCircle(color.Transparent)
-	ring.StrokeWidth = 2.5
 	ring.StrokeColor = color.Transparent
-	if speaking {
-		ring.StrokeColor = colSpeak
-	}
 	outer := size + pad*2
-	return container.New(&fixedSize{w: outer, h: outer},
-		ring,
-		container.NewCenter(container.New(&fixedSize{w: size, h: size}, stack)),
-	)
+	return &avatarView{
+		ring: ring,
+		obj: container.New(&fixedSize{w: outer, h: outer},
+			ring,
+			container.NewCenter(container.New(&fixedSize{w: size, h: size}, stack)),
+		),
+	}
 }
 
 // fixedSize — жёсткий размер (аватарки, иконки, индикаторы).

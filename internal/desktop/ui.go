@@ -31,12 +31,12 @@ func envOr(key, def string) string {
 }
 
 type UI struct {
-	app     fyne.App
-	win     fyne.Window
-	audio   *AudioEngine
-	api     *API
-	gw      *Gateway
-	avatars *avatarCache
+	app    fyne.App
+	win    fyne.Window
+	audio  *AudioEngine
+	api    *API
+	gw     *Gateway
+	images *imageCache
 
 	me     auth.User
 	groups []hub.GroupView
@@ -50,8 +50,15 @@ type UI struct {
 	deafened bool
 	micOK    bool
 
-	speaking map[string]bool // user id -> говорит прямо сейчас
-	unread   map[string]bool // channel id -> есть непрочитанное
+	speaking map[string]bool    // user id -> говорит прямо сейчас
+	levels   map[string]float64 // user id -> текущая громкость (для «дыхания» кольца)
+	unread   map[string]bool    // channel id -> есть непрочитанное
+
+	// аватарки, которым надо зажигать кольцо. Держим ссылки, чтобы обновлять
+	// их на месте, а не пересобирать списки по семь раз в секунду
+	avChannels map[string][]*avatarView
+	avMembers  map[string][]*avatarView
+	avMe       *avatarView
 
 	// каркас
 	railBox    *fyne.Container
@@ -73,6 +80,13 @@ type UI struct {
 	voiceStatus string
 	voiceTimer  *canvas.Text
 	voicePing   *pingBars
+
+	gateMeter *canvas.Rectangle // полоска уровня в настройках (nil — окно закрыто)
+
+	// чат
+	replyBar *fyne.Container
+	replyTo  int64                // id сообщения, на которое отвечаем
+	msgByID  map[int64]hub.OutMsg // для показа цитаты в ответах
 
 	// склейка подряд идущих сообщений одного автора
 	lastAuthor string
@@ -102,8 +116,12 @@ func Run() {
 
 	u := &UI{
 		app: a, win: w,
-		speaking: map[string]bool{},
-		unread:   map[string]bool{},
+		speaking:   map[string]bool{},
+		levels:     map[string]float64{},
+		unread:     map[string]bool{},
+		avChannels: map[string][]*avatarView{},
+		avMembers:  map[string][]*avatarView{},
+		msgByID:    map[int64]hub.OutMsg{},
 	}
 
 	audio, err := NewAudioEngine()
@@ -121,6 +139,7 @@ func Run() {
 		return
 	}
 	u.micOK = audio.StartCapture(a.Preferences().String("mic")) == nil
+	audio.SetGate(a.Preferences().FloatWithFallback("gate", 0.02))
 
 	// сохранённая сессия? — продлеваем через /api/refresh, а не просто /api/me,
 	// чтобы токен не протухал, пока юзер время от времени запускает приложение
@@ -225,7 +244,7 @@ func (u *UI) showLogin(errText string) {
 
 func (u *UI) start(api *API) {
 	u.api = api
-	u.avatars = newAvatarCache(api)
+	u.images = newImageCache(api, 48) // 48 МБ на все картинки — дальше вытесняем старые
 	u.buildShell()
 	u.gw = NewGateway(api, GatewayEvents{
 		OnReady: func(me auth.User, gs []hub.GroupView) {
@@ -333,7 +352,19 @@ func (u *UI) setPresence(uid string, online bool) {
 	}
 }
 
+// restoreVolumes применяет сохранённые громкости к тем, кто зашёл в голосовой:
+// настройка «этого потише» должна переживать перезапуск приложения.
+func (u *UI) restoreVolumes(ms []hub.VoiceMember) {
+	p := u.app.Preferences()
+	for _, m := range ms {
+		if v := p.IntWithFallback("vol:"+m.User.ID, 100); v != 100 {
+			u.audio.SetUserVolume(m.User.ID, v)
+		}
+	}
+}
+
 func (u *UI) setVoice(chID string, ms []hub.VoiceMember) {
+	u.restoreVolumes(ms)
 	g := u.channel(chID)
 	if g == nil {
 		return
@@ -415,6 +446,7 @@ func (u *UI) openChannel(chID string) {
 		u.msgsBox.Objects = nil
 		u.msgsBox.Refresh()
 	}
+	u.replyTo = 0
 	u.renderChannels()
 	u.renderRail() // непрочитанное могло погаснуть — обновляем значок группы
 	u.renderChatArea()

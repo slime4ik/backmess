@@ -18,17 +18,19 @@ import (
 /* ---------- панель «я» внизу списка каналов ---------- */
 
 func (u *UI) userPanel() fyne.CanvasObject {
-	u.btnMute = widget.NewButtonWithIcon("", theme.VolumeUpIcon(), func() { u.toggleMute() })
+	u.btnMute = widget.NewButtonWithIcon("", iconMicOn, func() { u.toggleMute() })
 	u.btnMute.Importance = widget.LowImportance
-	u.btnDeaf = widget.NewButtonWithIcon("", theme.VolumeDownIcon(), func() { u.toggleDeaf() })
+	u.btnDeaf = widget.NewButtonWithIcon("", iconSoundOn, func() { u.toggleDeaf() })
 	u.btnDeaf.Importance = widget.LowImportance
 	btnSettings := widget.NewButtonWithIcon("", theme.SettingsIcon(), func() { u.showAudioSettings() })
 	btnSettings.Importance = widget.LowImportance
 
 	u.meBox = container.NewHBox()
+	// индикатор связи живёт только в панели звонка: два одинаковых показателя
+	// на экране лишние, а вне канала задержка ни на что не влияет
 	panel := container.NewBorder(nil, nil, u.meBox,
 		container.NewHBox(u.btnMute, u.btnDeaf, btnSettings),
-		container.NewCenter(u.ping.box),
+		nil,
 	)
 	return container.NewPadded(panel)
 }
@@ -42,15 +44,10 @@ func (u *UI) renderMe() {
 		u.meBox.Refresh()
 		return
 	}
-	name := txt(u.me.Name, colText, 12, true)
-	sub := txt("в сети", colGreen, 10, false)
-	if u.deafened {
-		sub = txt("звук выключен", colRed, 10, false)
-	} else if u.muted {
-		sub = txt("микрофон выключен", colRed, 10, false)
-	}
-	u.meBox.Add(u.avatarRing(u.me, 30, u.speaking[u.me.ID] && !u.muted))
-	u.meBox.Add(container.NewVBox(name, sub))
+	u.avMe = u.avatarView(u.me, 30)
+	u.avMe.setSpeaking(u.speaking[u.me.ID] && !u.muted, u.levels[u.me.ID])
+	u.meBox.Add(u.avMe.obj)
+	u.meBox.Add(txt(u.me.Name, colText, 12, true))
 	u.meBox.Refresh()
 }
 
@@ -131,15 +128,54 @@ func (u *UI) showAudioSettings() {
 		u.audio.Beep([]float64{523, 659, 784}, 0.12, 0.16)
 	})
 
+	// Чувствительность — это порог, ниже которого микрофон не передаёт вообще.
+	// Живая полоска рядом показывает текущий уровень: видно, где проходит
+	// дыхание и шум вентилятора, а где начинается собственно речь.
+	gate := widget.NewSlider(0, 30) // проценты от максимума; выше 30 уже режет речь
+	gate.Step = 1
+	gate.Value = u.audio.Gate() * 100
+	gateHint := txt("", colDim, 10, false)
+	setHint := func(v float64) {
+		switch {
+		case v < 1:
+			gateHint.Text = "передаётся всё, включая шумы"
+		case v < 8:
+			gateHint.Text = "отсекает тихий фон"
+		case v < 18:
+			gateHint.Text = "отсекает клавиатуру и вентилятор"
+		default:
+			gateHint.Text = "только громкая речь"
+		}
+		gateHint.Refresh()
+	}
+	setHint(gate.Value)
+	gate.OnChanged = func(v float64) {
+		u.audio.SetGate(v / 100)
+		u.app.Preferences().SetFloat("gate", v/100)
+		setHint(v)
+	}
+
+	u.gateMeter = canvas.NewRectangle(colGreen)
+	u.gateMeter.CornerRadius = 2
+	meterBG := canvas.NewRectangle(colInput)
+	meterBG.CornerRadius = 2
+	meter := container.NewStack(meterBG,
+		container.NewBorder(nil, nil, nil, layoutSpacer(1), sized(0, 6, u.gateMeter)))
+
 	content := container.NewVBox(
 		txt("МИКРОФОН", colDim, 11, true), micSel,
 		txt("НАУШНИКИ / ДИНАМИКИ", colDim, 11, true), outSel,
+		widget.NewSeparator(),
+		txt("ЧУВСТВИТЕЛЬНОСТЬ МИКРОФОНА", colDim, 11, true),
+		gate, gateHint,
+		sized(0, 6, meter),
 		test,
 		status,
 		txt("если воткнул наушники после запуска — выбери их тут", colDim, 10, false),
 	)
 	d := dialog.NewCustom("звук", "закрыть", content, u.win)
-	d.Resize(fyne.NewSize(420, 340))
+	d.SetOnClosed(func() { u.gateMeter = nil })
+	d.Resize(fyne.NewSize(440, 520))
 	d.Show()
 }
 
@@ -329,17 +365,17 @@ func (u *UI) updateAVButtons() {
 		return
 	}
 	if u.muted {
-		u.btnMute.SetIcon(theme.VolumeMuteIcon())
+		u.btnMute.SetIcon(iconMicOff)
 		u.btnMute.Importance = widget.DangerImportance
 	} else {
-		u.btnMute.SetIcon(theme.VolumeUpIcon())
+		u.btnMute.SetIcon(iconMicOn)
 		u.btnMute.Importance = widget.LowImportance
 	}
 	if u.deafened {
-		u.btnDeaf.SetIcon(theme.VolumeMuteIcon())
+		u.btnDeaf.SetIcon(iconSoundOff)
 		u.btnDeaf.Importance = widget.DangerImportance
 	} else {
-		u.btnDeaf.SetIcon(theme.VolumeDownIcon())
+		u.btnDeaf.SetIcon(iconSoundOn)
 		u.btnDeaf.Importance = widget.LowImportance
 	}
 	u.btnMute.Refresh()
@@ -352,20 +388,27 @@ func (u *UI) updateAVButtons() {
 // пиковые уровни звука и перерисовывает подсветку говорящих, а раз в секунду
 // обновляет таймер и задержку голосового канала.
 func (u *UI) levelLoop() {
-	t := time.NewTicker(150 * time.Millisecond)
+	t := time.NewTicker(120 * time.Millisecond)
 	defer t.Stop()
 	tick := 0
 	for range t.C {
 		tick++
-		if u.voice == nil {
-			if len(u.speaking) > 0 {
-				fyne.Do(func() {
-					u.speaking = map[string]bool{}
-					u.renderChannels()
-					u.renderMembers()
-				})
+		inVoice := u.voice != nil
+		if !inVoice && len(u.speaking) == 0 && u.gateMeter == nil {
+			continue // нечего обновлять — не будим интерфейс попусту
+		}
+
+		levels := map[string]float64{}
+		if inVoice || u.gateMeter != nil {
+			for id, v := range u.audio.Levels() {
+				key := id
+				if id == "" {
+					key = u.me.ID // "" — это мой собственный микрофон
+				}
+				if key != "" {
+					levels[key] = v
+				}
 			}
-			continue
 		}
 
 		// два порога вместо одного: иначе на границе тишины индикатор
@@ -375,47 +418,66 @@ func (u *UI) levelLoop() {
 			levelOff = 0.02
 		)
 		next := map[string]bool{}
-		for id, v := range u.audio.Levels() {
-			key := id
-			if id == "" {
-				key = u.me.ID // "" — это мой собственный микрофон
-			}
-			if key == "" {
-				continue
-			}
+		for id, v := range levels {
 			switch {
 			case v > levelOn:
-				next[key] = true
+				next[id] = true
 			case v < levelOff:
-				next[key] = false
+				next[id] = false
 			default:
-				next[key] = u.speaking[key]
+				next[id] = u.speaking[id]
 			}
 		}
-		changed := len(next) != len(u.speaking)
-		if !changed {
-			for k, v := range next {
-				if u.speaking[k] != v {
-					changed = true
-					break
-				}
-			}
-		}
+		everySecond := tick%8 == 0
 
-		everySecond := tick%7 == 0
-		if changed || everySecond {
-			fyne.Do(func() {
-				if changed {
-					u.speaking = next
-					u.renderChannels()
-					u.renderMembers()
-				}
-				if everySecond {
-					u.updateVoiceStats()
-				}
-			})
+		fyne.Do(func() {
+			u.levels = levels
+			u.speaking = next
+			u.refreshSpeakingRings()
+			if u.gateMeter != nil {
+				u.updateGateMeter(levels[u.me.ID])
+			}
+			if everySecond {
+				u.updateVoiceStats()
+			}
+		})
+	}
+}
+
+// refreshSpeakingRings трогает только сами кольца. Раньше на каждое изменение
+// пересобирались списки каналов и участников целиком — по несколько раз в
+// секунду, что и было основной причиной лишнего расхода процессора.
+func (u *UI) refreshSpeakingRings() {
+	apply := func(m map[string][]*avatarView) {
+		for id, views := range m {
+			on := u.speaking[id]
+			lvl := u.levels[id]
+			for _, av := range views {
+				av.setSpeaking(on, lvl)
+			}
 		}
 	}
+	apply(u.avChannels)
+	apply(u.avMembers)
+	if u.avMe != nil {
+		u.avMe.setSpeaking(u.speaking[u.me.ID] && !u.muted, u.levels[u.me.ID])
+	}
+}
+
+// updateGateMeter — живая полоска уровня в настройках: по ней видно, куда
+// ставить порог чувствительности.
+func (u *UI) updateGateMeter(level float64) {
+	w := float32(level * 380)
+	if w > 380 {
+		w = 380
+	}
+	u.gateMeter.Resize(fyne.NewSize(w, 6))
+	if level > u.audio.Gate() {
+		u.gateMeter.FillColor = colGreen
+	} else {
+		u.gateMeter.FillColor = colOffline
+	}
+	u.gateMeter.Refresh()
 }
 
 func (u *UI) updateVoiceStats() {

@@ -29,11 +29,15 @@ tar xzf "$WORK/opus.tar.gz" -C "$WORK"
 build_opus() { # $1 = arch, $2 = host-триплет
   local arch="$1" host="$2"
   local log="$WORK/opus-$arch.log"
-  cp -R "$WORK/opus-${OPUS_VERSION}" "$WORK/opus-build-$arch"
+  # -p обязателен: без сохранения времени файлов make решает, что configure
+  # устарел относительно configure.ac, и лезет перегенерировать его через
+  # autotools, которых на машине нет. Это и была та «плавающая» ошибка сборки.
+  cp -Rp "$WORK/opus-${OPUS_VERSION}" "$WORK/opus-build-$arch"
   if ! (
     cd "$WORK/opus-build-$arch"
     ./configure --host="$host" --prefix="$WORK/opus-$arch" \
       --disable-shared --enable-static --disable-doc --disable-extra-programs \
+      --disable-maintainer-mode \
       CFLAGS="-arch $arch -mmacosx-version-min=11.0" \
       LDFLAGS="-arch $arch -mmacosx-version-min=11.0" >"$log" 2>&1
     # без -j: сборка opus занимает секунды, а параллельная изредка

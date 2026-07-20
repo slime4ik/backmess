@@ -37,12 +37,13 @@ type gwConn struct {
 // OutMsg — сообщение чата с уже вложенным автором: клиенту не нужно ходить
 // за профилем отдельно, он рисует сразу.
 type OutMsg struct {
-	ID   int64     `json:"id"`
-	Ch   string    `json:"ch"`
-	From auth.User `json:"from"`
-	Text string    `json:"text,omitempty"`
-	Img  string    `json:"img,omitempty"`
-	TS   int64     `json:"ts"`
+	ID      int64     `json:"id"`
+	Ch      string    `json:"ch"`
+	From    auth.User `json:"from"`
+	Text    string    `json:"text,omitempty"`
+	Img     string    `json:"img,omitempty"`
+	TS      int64     `json:"ts"`
+	ReplyTo int64     `json:"replyTo,omitempty"`
 }
 
 // VoiceMember — кто сидит в голосовом канале и в каком состоянии.
@@ -100,11 +101,13 @@ func (gw *Gateway) HandleWS(w http.ResponseWriter, r *http.Request, user auth.Us
 }
 
 type gwIn struct {
-	T    string `json:"t"`
-	Ch   string `json:"ch,omitempty"`
-	Text string `json:"text,omitempty"`
-	Img  string `json:"img,omitempty"`
-	TS   int64  `json:"ts,omitempty"`
+	T       string `json:"t"`
+	ID      int64  `json:"id,omitempty"` // id сообщения (для удаления)
+	Ch      string `json:"ch,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Img     string `json:"img,omitempty"`
+	TS      int64  `json:"ts,omitempty"`
+	ReplyTo int64  `json:"replyTo,omitempty"`
 }
 
 func (gw *Gateway) handle(c *gwConn, m gwIn) {
@@ -122,7 +125,17 @@ func (gw *Gateway) handle(c *gwConn, m gwIn) {
 		c.send(out{"t": "history", "ch": m.Ch, "msgs": gw.hydrate(m.Ch, gw.st.History(m.Ch))})
 
 	case "chat":
-		gw.PostChat(c.user, m.Ch, m.Text, m.Img)
+		gw.PostChat(c.user, m.Ch, m.Text, m.Img, m.ReplyTo)
+
+	case "delete":
+		g, _, ok := gw.st.ChannelGroup(m.Ch)
+		if !ok || !g.HasMember(c.user.ID) {
+			return
+		}
+		if err := gw.st.DeleteMsg(m.Ch, m.ID, c.user.ID); err != nil {
+			return
+		}
+		gw.ToGroup(g, out{"t": "msg-deleted", "ch": m.Ch, "id": m.ID})
 	}
 }
 
@@ -329,13 +342,13 @@ func (gw *Gateway) hydrate(chID string, msgs []store.Msg) []OutMsg {
 		if !ok {
 			u = auth.User{ID: m.From, Name: "кто-то", Color: auth.ColorFor(m.From)}
 		}
-		out = append(out, OutMsg{ID: m.ID, Ch: chID, From: u, Text: m.Text, Img: m.Img, TS: m.TS})
+		out = append(out, OutMsg{ID: m.ID, Ch: chID, From: u, Text: m.Text, Img: m.Img, TS: m.TS, ReplyTo: m.ReplyTo})
 	}
 	return out
 }
 
 // PostChat кладёт сообщение в историю и рассылает участникам группы.
-func (gw *Gateway) PostChat(u auth.User, chID, text, img string) {
+func (gw *Gateway) PostChat(u auth.User, chID, text, img string, replyTo int64) {
 	text = trimChat(text)
 	// картинки принимаем только свои загруженные — чужие ссылки в чат не пускаем
 	if img != "" && !isUploadPath(img) {
@@ -348,8 +361,8 @@ func (gw *Gateway) PostChat(u auth.User, chID, text, img string) {
 	if !ok || ch.Kind != "text" || !g.HasMember(u.ID) {
 		return
 	}
-	m := gw.st.AddMsg(chID, u, text, img)
+	m := gw.st.AddMsg(chID, u, text, img, replyTo)
 	gw.ToGroup(g, out{"t": "chat", "msg": OutMsg{
-		ID: m.ID, Ch: chID, From: u, Text: m.Text, Img: m.Img, TS: m.TS,
+		ID: m.ID, Ch: chID, From: u, Text: m.Text, Img: m.Img, TS: m.TS, ReplyTo: m.ReplyTo,
 	}})
 }

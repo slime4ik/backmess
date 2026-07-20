@@ -15,6 +15,9 @@ const (
 	sampleRate = 48000
 	frameSize  = 960 // 20 мс моно — стандартный кадр Opus
 	maxFrame   = 5760
+	// ~0.4 с после спада уровня продолжаем передавать: иначе шумодав срезает
+	// concы слов и речь звучит рубленой
+	gateTailFrames = 20
 )
 
 // AudioEngine: захват микрофона → Opus 32kbps VoIP → наружу через OnMicFrame;
@@ -36,11 +39,15 @@ type AudioEngine struct {
 	muted  atomic.Bool
 	deaf   atomic.Bool
 
+	gate     atomic.Int32 // порог чувствительности микрофона в единицах пика
+	gateTail int          // сколько кадров ещё пропускать после спада уровня
+
 	// OnMicFrame вызывается из аудио-потока: копия кадра уже сделана
 	OnMicFrame func(data []byte)
 
 	mu      sync.Mutex
 	sources map[string]*audioSource
+	userVol map[string]int // выбранная юзером громкость участников
 
 	beepMu  sync.Mutex
 	beepBuf []int16
@@ -53,6 +60,15 @@ type audioSource struct {
 	rem    []int16
 	pcm    []int16
 	lvl    atomic.Int32
+	vol    atomic.Int32 // громкость в процентах, 100 = как есть
+}
+
+func (s *audioSource) volume() float64 {
+	v := s.vol.Load()
+	if v == 0 {
+		return 1
+	}
+	return float64(v) / 100
 }
 
 func NewAudioEngine() (*AudioEngine, error) {
@@ -67,6 +83,7 @@ func NewAudioEngine() (*AudioEngine, error) {
 		enc:     enc,
 		encBuf:  make([]byte, 4000),
 		sources: map[string]*audioSource{},
+		userVol: map[string]int{},
 		mixAcc:  make([]int32, 8192),
 	}
 
@@ -218,6 +235,21 @@ func peak16(pcm []int16) int32 {
 	return p
 }
 
+// Gate — порог чувствительности микрофона (0..1 от максимума). Всё тише порога
+// не кодируется и не уходит в сеть: это и шумодав, и экономия — тишина не жуёт
+// ни процессор на кодирование, ни канал.
+func (e *AudioEngine) SetGate(v float64) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+	e.gate.Store(int32(v * 32768))
+}
+
+func (e *AudioEngine) Gate() float64 { return float64(e.gate.Load()) / 32768 }
+
 func (e *AudioEngine) onCapture(_, in []byte, _ uint32) {
 	e.micAcc = append(e.micAcc, s16(in)...)
 	for len(e.micAcc) >= frameSize {
@@ -225,9 +257,21 @@ func (e *AudioEngine) onCapture(_, in []byte, _ uint32) {
 		if e.muted.Load() {
 			e.micLvl.Store(0)
 		} else {
-			e.micLvl.Store(peak16(frame))
-			if n, err := e.enc.Encode(frame, e.encBuf); err == nil && e.OnMicFrame != nil {
-				e.OnMicFrame(append([]byte(nil), e.encBuf[:n]...))
+			peak := peak16(frame)
+			if peak < e.gate.Load() {
+				// тишина: держим счётчик «хвоста», чтобы не рубить окончания слов
+				e.micLvl.Store(0)
+				if e.gateTail > 0 {
+					e.gateTail--
+				}
+			} else {
+				e.micLvl.Store(peak)
+				e.gateTail = gateTailFrames
+			}
+			if peak >= e.gate.Load() || e.gateTail > 0 {
+				if n, err := e.enc.Encode(frame, e.encBuf); err == nil && e.OnMicFrame != nil {
+					e.OnMicFrame(append([]byte(nil), e.encBuf[:n]...))
+				}
 			}
 		}
 		e.micAcc = append(e.micAcc[:0], e.micAcc[frameSize:]...)
@@ -318,6 +362,9 @@ func (e *AudioEngine) Ingest(id string, payload []byte) {
 			return
 		}
 		src = &audioSource{dec: dec, frames: make(chan []int16, 8), pcm: make([]int16, maxFrame)}
+		if v, ok := e.userVol[id]; ok {
+			src.vol.Store(int32(v))
+		}
 		e.sources[id] = src
 	}
 	e.mu.Unlock()
@@ -332,6 +379,26 @@ func (e *AudioEngine) Ingest(id string, payload []byte) {
 	case src.frames <- frame:
 	default: // отстаём — кадр дропаем, лаг важнее плавности
 	}
+}
+
+// SetUserVolume — индивидуальная громкость участника в процентах (100 = обычная).
+// Хранится вместе с источником, применяется прямо в микшере.
+func (e *AudioEngine) SetUserVolume(id string, percent int) {
+	e.mu.Lock()
+	e.userVol[id] = percent
+	if src := e.sources[id]; src != nil {
+		src.vol.Store(int32(percent))
+	}
+	e.mu.Unlock()
+}
+
+func (e *AudioEngine) UserVolume(id string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if v, ok := e.userVol[id]; ok {
+		return v
+	}
+	return 100
 }
 
 func (e *AudioEngine) RemoveSource(id string) {

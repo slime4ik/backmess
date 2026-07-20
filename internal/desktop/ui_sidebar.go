@@ -159,6 +159,7 @@ func (u *UI) renderChannels() {
 		return
 	}
 	u.chanBox.Objects = nil
+	u.avChannels = map[string][]*avatarView{}
 	g := u.curGroupView()
 	if g == nil {
 		u.chanBox.Refresh()
@@ -243,9 +244,12 @@ func (u *UI) voiceMemberRow(vm hub.VoiceMember) fyne.CanvasObject {
 	if speaking {
 		nameCol = colSpeak
 	}
+	av := u.avatarView(vm.User, 20)
+	av.setSpeaking(speaking, u.levels[vm.User.ID])
+	u.avChannels[vm.User.ID] = append(u.avChannels[vm.User.ID], av)
 	line := container.NewHBox(
 		sized(10, 14, canvas.NewRectangle(color.Transparent)), // отступ вложенности
-		u.avatarRing(vm.User, 20, speaking),
+		av.obj,
 		txt(vm.User.Name, nameCol, 12, false),
 	)
 	if vm.State.Deafened {
@@ -253,7 +257,55 @@ func (u *UI) voiceMemberRow(vm hub.VoiceMember) fyne.CanvasObject {
 	} else if vm.State.Muted {
 		line.Add(txt("мут", colRed, 10, true))
 	}
-	return container.NewPadded(line)
+	user := vm.User
+	row := newTapRow(container.NewPadded(line), nil)
+	row.onSecondary = func(pos fyne.Position) { u.memberMenu(user, pos) }
+	return row
+}
+
+// memberMenu — всплывашка по правому клику на человеке: сразу ползунок
+// громкости, без промежуточного окна. Настройка локальная, применяется в
+// микшере и никого, кроме тебя, не касается.
+func (u *UI) memberMenu(user auth.User, pos fyne.Position) {
+	if user.ID == u.me.ID {
+		return // себе громкость не крутят
+	}
+
+	cur := u.audio.UserVolume(user.ID)
+	val := txt(fmt.Sprintf("%d%%", cur), colText, 11, true)
+
+	sl := widget.NewSlider(0, 200)
+	sl.Step = 5
+	sl.Value = float64(cur)
+	sl.OnChanged = func(v float64) {
+		val.Text = fmt.Sprintf("%d%%", int(v))
+		val.Refresh()
+		u.audio.SetUserVolume(user.ID, int(v))
+		u.app.Preferences().SetInt("vol:"+user.ID, int(v))
+	}
+
+	var pop *widget.PopUp
+	reset := widget.NewButton("сброс", func() { sl.SetValue(100) })
+	reset.Importance = widget.LowImportance
+	closeBtn := widget.NewButtonWithIcon("", theme.CancelIcon(), func() { pop.Hide() })
+	closeBtn.Importance = widget.LowImportance
+
+	bg := canvas.NewRectangle(colSide)
+	bg.CornerRadius = 8
+	bg.StrokeColor = colLine
+	bg.StrokeWidth = 1
+
+	card := container.NewVBox(
+		container.NewBorder(nil, nil,
+			container.NewHBox(u.avatar(user, 22), txt(user.Name, colText, 12, true)),
+			closeBtn, nil),
+		container.NewBorder(nil, nil, txt("громкость", colDim, 11, false), val, nil),
+		sl,
+		reset,
+	)
+	content := container.NewStack(bg, container.NewPadded(card))
+	pop = widget.NewPopUp(container.NewGridWrap(fyne.NewSize(240, 150), content), u.win.Canvas())
+	pop.ShowAtPosition(pos)
 }
 
 func (u *UI) addChannelButton(gid, kind string) *widget.Button {
@@ -461,6 +513,7 @@ func (u *UI) renderMembers() {
 		return
 	}
 	u.membersBox.Objects = nil
+	u.avMembers = map[string][]*avatarView{}
 	g := u.curGroupView()
 	if g == nil {
 		u.membersBox.Refresh()
@@ -509,15 +562,21 @@ func (u *UI) renderMembers() {
 				nameCol = colSpeak
 			}
 			name := txt(e.user.Name, nameCol, 13, false)
+			av := u.avatarView(e.user, 24)
+			av.setSpeaking(speaking, u.levels[e.user.ID])
+			u.avMembers[e.user.ID] = append(u.avMembers[e.user.ID], av)
 			row := container.NewHBox(
-				u.avatarRing(e.user, 24, speaking),
+				av.obj,
 				container.NewVBox(name),
 				statusDot(e.online, 8),
 			)
 			if e.user.ID == g.Owner {
 				row.Add(txt("★", colAmber, 11, false))
 			}
-			u.membersBox.Add(container.NewPadded(row))
+			user := e.user
+			tap := newTapRow(container.NewPadded(row), nil)
+			tap.onSecondary = func(pos fyne.Position) { u.memberMenu(user, pos) }
+			u.membersBox.Add(tap)
 		}
 	}
 	section("В СЕТИ", true, online)

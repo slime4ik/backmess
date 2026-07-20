@@ -2,7 +2,7 @@
 #
 # На выходе ровно три файла для людей:
 #   mess-macos.dmg          — универсальный (Apple Silicon + Intel), перетащить в Applications
-#   mess-windows-amd64.zip  — exe рядом с нужными dll
+#   mess.exe                — один файл, без dll рядом
 #   mess-linux-amd64.tar.gz — бинарь + ярлык + install.sh
 # и отдельно бинари сервера для деплоя.
 name: release
@@ -75,19 +75,24 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-opus mingw-w64-x86_64-pkg-config zip
-      # -H windowsgui — чтобы при запуске не открывалось чёрное окно консоли.
-      # Рядом с exe кладём dll из MinGW: без них приложение не стартует.
-      - name: package
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-opus mingw-w64-x86_64-pkg-config
+      # Один exe без папки с dll: -extldflags -static вшивает libopus и
+      # рантайм MinGW внутрь. Раньше рядом лежали три dll, и стоило юзеру
+      # вытащить exe из папки — приложение переставало запускаться.
+      # -H windowsgui убирает чёрное окно консоли при запуске.
+      - name: build
         shell: msys2 {0}
         run: |
           export PATH="$PATH:/c/hostedtoolcache/windows/go/$(ls /c/hostedtoolcache/windows/go | head -1)/x64/bin"
-          CGO_ENABLED=1 go build -tags nolibopusfile -ldflags="-s -w -H windowsgui" -o mess.exe ./cmd/backmess-app
-          mkdir dist && cp mess.exe dist/
-          for dll in libopus-0.dll libwinpthread-1.dll libgcc_s_seh-1.dll; do
-            cp /mingw64/bin/$dll dist/ 2>/dev/null || true
-          done
-          cd dist && zip -r ../mess-windows-amd64.zip .
+          CGO_ENABLED=1 go build -tags nolibopusfile \
+            -ldflags="-s -w -H windowsgui -extldflags '-static'" \
+            -o mess.exe ./cmd/backmess-app
+          # проверяем, что зависимостей от MinGW-dll не осталось
+          if ldd mess.exe 2>/dev/null | grep -iE "libopus|libwinpthread|libgcc"; then
+            echo "!! exe всё ещё тянет dll — статическая сборка не сработала"
+            exit 1
+          fi
+          echo "exe самодостаточный"
       - uses: softprops/action-gh-release@v2
         with:
-          files: mess-windows-amd64.zip
+          files: mess.exe
