@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: "1.26.x" }
       - name: package
-        run: ./scripts/package-macos.sh "${GITHUB_REF_NAME#v}" mess-macos.dmg
+        run: bash scripts/package-macos.sh "${GITHUB_REF_NAME#v}" mess-macos.dmg
       - uses: softprops/action-gh-release@v2
         with:
           files: mess-macos.dmg
@@ -61,7 +61,7 @@ jobs:
             libwayland-dev libx11-dev libxkbcommon-dev xorg-dev \
             libopus-dev pkg-config
       - name: package
-        run: ./scripts/package-linux.sh "${GITHUB_REF_NAME#v}" mess-linux-amd64.tar.gz
+        run: bash scripts/package-linux.sh "${GITHUB_REF_NAME#v}" mess-linux-amd64.tar.gz
       - uses: softprops/action-gh-release@v2
         with:
           files: mess-linux-amd64.tar.gz
