@@ -2,7 +2,6 @@ package desktop
 
 import (
 	"fmt"
-	"math"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -422,35 +421,4 @@ func (e *AudioEngine) Levels() map[string]float64 {
 	}
 	e.mu.Unlock()
 	return out
-}
-
-// Beep — короткий синтезированный сигнал (вход/выход/сообщение).
-func (e *AudioEngine) Beep(freqs []float64, dur float64, vol float64) {
-	total := 0
-	segs := make([][]int16, len(freqs))
-	for i, f := range freqs {
-		n := int(sampleRate * dur)
-		seg := make([]int16, n)
-		for j := 0; j < n; j++ {
-			env := 1.0
-			edge := int(0.005 * sampleRate)
-			if j < edge {
-				env = float64(j) / float64(edge)
-			} else if n-j < edge {
-				env = float64(n-j) / float64(edge)
-			}
-			seg[j] = int16(vol * env * 32767 * math.Sin(2*math.Pi*f*float64(j)/sampleRate))
-		}
-		segs[i] = seg
-		total += n
-	}
-	buf := make([]int16, 0, total)
-	for _, s := range segs {
-		buf = append(buf, s...)
-	}
-	e.beepMu.Lock()
-	if len(e.beepBuf) < sampleRate { // не копим очередь писков
-		e.beepBuf = append(e.beepBuf, buf...)
-	}
-	e.beepMu.Unlock()
 }

@@ -125,7 +125,7 @@ func (u *UI) showAudioSettings() {
 	}
 
 	test := widget.NewButton("проверить звук", func() {
-		u.audio.PlaySound(SoundJoin, 0.7)
+		u.audio.PlaySound(SoundJoin)
 	})
 
 	// Чувствительность — это порог, ниже которого микрофон не передаёт вообще.
@@ -251,10 +251,10 @@ func (u *UI) joinVoice(chID, name string) {
 
 	ev := VoiceEvents{
 		OnMemberJoin: func(m hub.MemberInfo) {
-			u.audio.PlaySound(SoundJoin, 0.7)
+			u.audio.PlaySound(SoundJoin)
 		},
 		OnMemberLeave: func(id string) {
-			u.audio.PlaySound(SoundLeave, 0.8)
+			u.audio.PlaySound(SoundLeave)
 		},
 		OnRTC: func(state string) {
 			fyne.Do(func() {
@@ -264,14 +264,12 @@ func (u *UI) joinVoice(chID, name string) {
 				switch state {
 				case "connected":
 					u.voiceStatus = "голос подключён"
-					// короткий синтезированный сигнал, а не звук-уведомление:
-					// это подтверждение своего действия, оно должно быть
-					// незаметным и не перебивать разговор
-					u.audio.Beep([]float64{523, 784}, 0.08, 0.10)
+					u.audio.PlaySound(SoundConnect)
 				case "connecting", "new":
 					u.voiceStatus = "подключаюсь…"
 				case "failed", "disconnected":
 					u.voiceStatus = "связь потеряна"
+					u.audio.PlaySound(SoundHangup)
 				default:
 					u.voiceStatus = state
 				}
@@ -324,6 +322,7 @@ func (u *UI) leaveVoice() {
 	if v := u.voice; v != nil {
 		u.voice = nil // сначала снимаем «текущий», чтобы колбэк ничего не трогал
 		v.Close("вышел")
+		u.audio.PlaySound(SoundHangup)
 	}
 	u.voiceCh = ""
 	u.voiceStatus = ""
@@ -354,9 +353,19 @@ func (u *UI) toggleDeaf() {
 }
 
 func (u *UI) applyAV() {
-	// мут дёргают постоянно, поэтому тут нарочно тихий щелчок, а не
-	// звук-уведомление: иначе он приестся за пять минут
-	u.audio.Beep([]float64{map[bool]float64{true: 233, false: 349}[u.muted]}, 0.05, 0.06)
+	// свои переключатели звучат тихо, но по-разному: в игре надо на слух
+	// понимать, что именно ты нажал, не разворачивая окно
+	switch {
+	case u.deafened:
+		u.audio.PlaySound(SoundDeafOn)
+	case u.wasDeafened:
+		u.audio.PlaySound(SoundDeafOff)
+	case u.muted:
+		u.audio.PlaySound(SoundMuteOn)
+	default:
+		u.audio.PlaySound(SoundMuteOff)
+	}
+	u.wasDeafened = u.deafened
 	if u.voice != nil {
 		u.voice.SetState(u.muted, u.deafened)
 	} else {

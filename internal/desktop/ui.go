@@ -48,7 +48,10 @@ type UI struct {
 	voiceCh  string
 	muted    bool
 	deafened bool
-	micOK    bool
+	// нужно, чтобы отличить «вернул звук» от «включил микрофон»: событие одно,
+	// а сигналы должны быть разными
+	wasDeafened bool
+	micOK       bool
 
 	speaking map[string]bool    // user id -> говорит прямо сейчас
 	levels   map[string]float64 // user id -> текущая громкость (для «дыхания» кольца)
@@ -321,6 +324,7 @@ func (u *UI) upsertGroup(g hub.GroupView) {
 		}
 	}
 	u.groups = append(u.groups, g)
+	u.audio.PlaySound(SoundNewGroup)
 	// свежесозданную/принятую группу сразу открываем — иначе непонятно,
 	// сработала ли кнопка вообще
 	u.curGroup = g.ID

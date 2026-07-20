@@ -2,23 +2,24 @@ package desktop
 
 import "testing"
 
-// Звуки лежат в репозитории уже раскодированными, поэтому сломать их можно
-// только пересобрав из исходников. Тест страхует от тихой поломки: пустой или
-// битый файл иначе проявился бы только тишиной у юзера.
-func TestEmbeddedSounds(t *testing.T) {
-	soundsOnce.Do(loadSounds)
+// Звуки собираются из двух семплов на старте. Тест страхует от тихой поломки:
+// пустой сигнал иначе проявился бы только тишиной у юзера, без ошибки в логе.
+func TestSoundEvents(t *testing.T) {
+	soundsOnce.Do(buildSounds)
 
-	for _, name := range []string{SoundJoin, SoundLeave, SoundMessage, SoundReply} {
-		pcm, ok := sounds[name]
-		if !ok {
-			t.Fatalf("звук %q не встроен", name)
+	if len(samples[sampleBig]) == 0 || len(samples[sampleSmall]) == 0 {
+		t.Fatal("исходные семплы не встроились")
+	}
+
+	for name := range soundEvents {
+		pcm, ok := events[name]
+		if !ok || len(pcm) == 0 {
+			t.Errorf("сигнал %q не собрался", name)
+			continue
 		}
-		if len(pcm) == 0 {
-			t.Fatalf("звук %q пустой", name)
-		}
-		// уведомление должно быть коротким: длинное раздражает и перекрывает речь
+		// уведомление должно быть коротким: длинное перекрывает разговор
 		if sec := float64(len(pcm)) / sampleRate; sec > 1.5 {
-			t.Errorf("звук %q слишком длинный: %.2f с", name, sec)
+			t.Errorf("сигнал %q слишком длинный: %.2f с", name, sec)
 		}
 		var peak int16
 		for _, s := range pcm {
@@ -29,12 +30,38 @@ func TestEmbeddedSounds(t *testing.T) {
 			}
 		}
 		if peak == 0 {
-			t.Errorf("звук %q — сплошная тишина", name)
+			t.Errorf("сигнал %q — тишина", name)
 		}
-		// громкость выровнена при сборке; если пик у самой границы, значит
-		// файл подменили ненормализованным и он ударит по ушам
-		if peak > 30000 {
-			t.Errorf("звук %q слишком громкий: пик %d", name, peak)
+		// при наложении двух семплов легко словить перегруз и хрип
+		if peak > 32000 {
+			t.Errorf("сигнал %q перегружен: пик %d", name, peak)
 		}
+	}
+}
+
+// Разные события обязаны звучать по-разному, иначе теряется весь смысл:
+// в игре окно не видно и сигнал — единственный способ понять, что случилось.
+func TestSoundEventsAreDistinct(t *testing.T) {
+	soundsOnce.Do(buildSounds)
+	seen := map[string]string{}
+	for name := range soundEvents {
+		pcm := events[name]
+		if len(pcm) == 0 {
+			continue
+		}
+		// грубая подпись: длина плюс сумма модулей — совпадение означает,
+		// что сигналы неразличимы и на слух
+		var sum int64
+		for _, s := range pcm {
+			if s < 0 {
+				s = -s
+			}
+			sum += int64(s)
+		}
+		key := string(rune(len(pcm)%251)) + ":" + string(rune(sum%251))
+		if other, dup := seen[key]; dup {
+			t.Errorf("сигналы %q и %q звучат одинаково", name, other)
+		}
+		seen[key] = name
 	}
 }
