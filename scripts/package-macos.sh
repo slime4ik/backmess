@@ -24,29 +24,44 @@ echo ">> собираю libopus под обе архитектуры"
 curl -sL --retry 3 -o "$WORK/opus.tar.gz" "$OPUS_URL"
 tar xzf "$WORK/opus.tar.gz" -C "$WORK"
 
+# Логи пишем в файл и показываем ТОЛЬКО при падении: молча глотать вывод
+# нельзя — иначе при ошибке остаёшься с голым «exit 2» и без единой подсказки.
 build_opus() { # $1 = arch, $2 = host-триплет
   local arch="$1" host="$2"
+  local log="$WORK/opus-$arch.log"
   cp -R "$WORK/opus-${OPUS_VERSION}" "$WORK/opus-build-$arch"
-  (
+  if ! (
     cd "$WORK/opus-build-$arch"
     ./configure --host="$host" --prefix="$WORK/opus-$arch" \
       --disable-shared --enable-static --disable-doc --disable-extra-programs \
       CFLAGS="-arch $arch -mmacosx-version-min=11.0" \
-      LDFLAGS="-arch $arch -mmacosx-version-min=11.0" >/dev/null 2>&1
-    make -j"$(sysctl -n hw.ncpu)" >/dev/null 2>&1
-    make install >/dev/null 2>&1
-  )
+      LDFLAGS="-arch $arch -mmacosx-version-min=11.0" >"$log" 2>&1
+    # без -j: сборка opus занимает секунды, а параллельная изредка
+    # разваливается на гонке в автотулзах — надёжность тут важнее
+    make >>"$log" 2>&1
+    make install >>"$log" 2>&1
+  ); then
+    echo "!! libopus ($arch) не собрался, хвост лога:" >&2
+    tail -30 "$log" >&2
+    exit 1
+  fi
 }
 build_opus arm64 aarch64-apple-darwin
 build_opus x86_64 x86_64-apple-darwin
 
 echo ">> собираю приложение под обе архитектуры"
+# Пути к opus прописываем ЯВНО в CGO_*FLAGS, а не только через PKG_CONFIG_PATH:
+# последний не входит в ключ кэша сборки Go, поэтому от прошлого запуска
+# подхватывался уже удалённый каталог и линковка падала с "library 'opus' not
+# found". PKG_CONFIG_LIBDIR (а не PATH) заодно отрезает системные пути, чтобы
+# в x86_64-сборку не приехал arm64-опус из Homebrew.
 build_app() { # $1 = arch, $2 = GOARCH
   local arch="$1" goarch="$2"
-  PKG_CONFIG_PATH="$WORK/opus-$arch/lib/pkgconfig" \
+  local prefix="$WORK/opus-$arch"
+  PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig" \
   CGO_ENABLED=1 GOOS=darwin GOARCH="$goarch" \
-  CGO_CFLAGS="-arch $arch -mmacosx-version-min=11.0" \
-  CGO_LDFLAGS="-arch $arch -mmacosx-version-min=11.0" \
+  CGO_CFLAGS="-arch $arch -mmacosx-version-min=11.0 -I$prefix/include" \
+  CGO_LDFLAGS="-arch $arch -mmacosx-version-min=11.0 -L$prefix/lib" \
   go build -tags nolibopusfile -ldflags="-s -w" -o "$WORK/mess-$arch" "$ROOT/cmd/backmess-app"
 }
 build_app arm64 arm64
