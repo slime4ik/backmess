@@ -44,10 +44,12 @@ type UI struct {
 	curGroup string // выбранная группа
 	curChan  string // открытый текстовый канал
 
-	voice    *VoiceClient
-	voiceCh  string
-	muted    bool
-	deafened bool
+	voice      *VoiceClient
+	voiceCh    string
+	voiceName  string // имя канала: нужно для переподключения
+	voiceTries int    // попыток восстановить связь подряд
+	muted      bool
+	deafened   bool
 	// нужно, чтобы отличить «вернул звук» от «включил микрофон»: событие одно,
 	// а сигналы должны быть разными
 	wasDeafened bool
@@ -77,6 +79,7 @@ type UI struct {
 	btnMute    *widget.Button
 	btnDeaf    *widget.Button
 	ping       *pingBars
+	notify     *notifier
 
 	// панель голосового подключения
 	voiceBox    *fyne.Container
@@ -87,9 +90,12 @@ type UI struct {
 	gateMeter *canvas.Rectangle // полоска уровня в настройках (nil — окно закрыто)
 
 	// чат
-	replyBar *fyne.Container
-	replyTo  int64                // id сообщения, на которое отвечаем
-	msgByID  map[int64]hub.OutMsg // для показа цитаты в ответах
+	shiftHeld  bool                 // зажат Shift — показываем действия сообщения
+	hoveredMsg int64                // над каким сообщением сейчас курсор
+	msgSlots   map[int64]func(bool) // переключатели панелей действий
+	replyBar   *fyne.Container
+	replyTo    int64                // id сообщения, на которое отвечаем
+	msgByID    map[int64]hub.OutMsg // для показа цитаты в ответах
 
 	// склейка подряд идущих сообщений одного автора
 	lastAuthor string
@@ -125,6 +131,7 @@ func Run() {
 		avChannels: map[string][]*avatarView{},
 		avMembers:  map[string][]*avatarView{},
 		msgByID:    map[int64]hub.OutMsg{},
+		msgSlots:   map[int64]func(bool){},
 	}
 
 	audio, err := NewAudioEngine()
@@ -247,6 +254,7 @@ func (u *UI) showLogin(errText string) {
 
 func (u *UI) start(api *API) {
 	u.api = api
+	u.notify = newNotifier(u.app)
 	u.images = newImageCache(api, 48) // 48 МБ на все картинки — дальше вытесняем старые
 	u.buildShell()
 	u.gw = NewGateway(api, GatewayEvents{

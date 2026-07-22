@@ -111,7 +111,14 @@ func (c *VoiceClient) send(m wsMsg) {
 }
 
 func (c *VoiceClient) buildPC() error {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+	// Таймауты должны совпадать с серверными: иначе одна сторона считает
+	// связь мёртвой, а вторая ещё нет. Дефолтные 25 секунд слишком строги —
+	// человека выбрасывало из канала от короткого провала вайфая.
+	se := webrtc.SettingEngine{}
+	se.SetICETimeouts(15*time.Second, 60*time.Second, 2*time.Second)
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
 	})
 	if err != nil {

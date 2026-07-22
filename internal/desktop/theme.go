@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -485,69 +484,6 @@ func statusDot(online bool, size float32) fyne.CanvasObject {
 	}
 	return sized(size, size, c)
 }
-
-/* ---------- удержание наведения ---------- */
-
-// hoverGroup — общее состояние наведения для нескольких соседних виджетов.
-//
-// Нужен из-за особенности Fyne: как только курсор заходит на кнопку внутри
-// строки, сама строка получает MouseOut. Панелька действий пряталась, курсор
-// снова оказывался над строкой — и она мигала без остановки. Теперь считаем
-// наведение по всей группе и прячем с небольшой задержкой.
-type hoverGroup struct {
-	n     int
-	timer *time.Timer
-	apply func(bool)
-}
-
-func (h *hoverGroup) enter() {
-	h.n++
-	h.update()
-}
-
-func (h *hoverGroup) leave() {
-	h.n--
-	h.update()
-}
-
-func (h *hoverGroup) update() {
-	if h.timer != nil {
-		h.timer.Stop()
-		h.timer = nil
-	}
-	if h.n > 0 {
-		h.apply(true)
-		return
-	}
-	// задержка нужна на перескок курсора между строкой и кнопками
-	h.timer = time.AfterFunc(140*time.Millisecond, func() {
-		fyne.Do(func() {
-			if h.n <= 0 {
-				h.apply(false)
-			}
-		})
-	})
-}
-
-// hoverArea — прозрачная обёртка, которая только сообщает о наведении.
-type hoverArea struct {
-	widget.BaseWidget
-	content fyne.CanvasObject
-	on      func(bool)
-}
-
-func newHoverArea(content fyne.CanvasObject, on func(bool)) *hoverArea {
-	h := &hoverArea{content: content, on: on}
-	h.ExtendBaseWidget(h)
-	return h
-}
-
-func (h *hoverArea) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(h.content)
-}
-func (h *hoverArea) MouseIn(*fynedesktop.MouseEvent)    { h.on(true) }
-func (h *hoverArea) MouseOut()                          { h.on(false) }
-func (h *hoverArea) MouseMoved(*fynedesktop.MouseEvent) {}
 
 /* ---------- всплывающие меню ---------- */
 

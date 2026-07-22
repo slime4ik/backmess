@@ -17,6 +17,8 @@ const (
 	// ~0.4 с после спада уровня продолжаем передавать: иначе шумодав срезает
 	// concы слов и речь звучит рубленой
 	gateTailFrames = 20
+	// кадр раз в ~секунду при полной тишине: держит NAT и ICE живыми
+	keepAliveFrames = 50
 )
 
 // AudioEngine: захват микрофона → Opus 32kbps VoIP → наружу через OnMicFrame;
@@ -38,8 +40,9 @@ type AudioEngine struct {
 	muted  atomic.Bool
 	deaf   atomic.Bool
 
-	gate     atomic.Int32 // порог чувствительности микрофона в единицах пика
-	gateTail int          // сколько кадров ещё пропускать после спада уровня
+	gate      atomic.Int32 // порог чувствительности микрофона в единицах пика
+	gateTail  int          // сколько кадров ещё пропускать после спада уровня
+	keepAlive int          // кадров прошло с последней отправки
 
 	// OnMicFrame вызывается из аудио-потока: копия кадра уже сделана
 	OnMicFrame func(data []byte)
@@ -253,24 +256,54 @@ func (e *AudioEngine) onCapture(_, in []byte, _ uint32) {
 	e.micAcc = append(e.micAcc, s16(in)...)
 	for len(e.micAcc) >= frameSize {
 		frame := e.micAcc[:frameSize]
-		if e.muted.Load() {
+		muted := e.muted.Load()
+
+		// Решаем, отправлять ли кадр. Пока человек молчит (или сидит в муте),
+		// звук не кодируется и не уходит в сеть — это и шумодав, и экономия
+		// трафика с процессором.
+		//
+		// Но замолкать НАСОВСЕМ нельзя: без исходящих пакетов NAT через пару
+		// минут закрывает сопоставление, соединение рвётся и человека выносит
+		// из канала. Поэтому при тишине раз в ~секунду всё равно отправляем
+		// кадр тишины — он занимает считанные байты, зато поток жив.
+		send := false
+		silent := false
+		switch {
+		case muted:
 			e.micLvl.Store(0)
-		} else {
-			peak := peak16(frame)
-			if peak < e.gate.Load() {
-				// тишина: держим счётчик «хвоста», чтобы не рубить окончания слов
-				e.micLvl.Store(0)
-				if e.gateTail > 0 {
-					e.gateTail--
-				}
+			e.gateTail = 0
+			silent = true
+		case peak16(frame) >= e.gate.Load():
+			e.micLvl.Store(peak16(frame))
+			e.gateTail = gateTailFrames
+			send = true
+		default:
+			// ниже порога: доигрываем «хвост», чтобы не рубить концы слов
+			e.micLvl.Store(0)
+			if e.gateTail > 0 {
+				e.gateTail--
+				send = true
 			} else {
-				e.micLvl.Store(peak)
-				e.gateTail = gateTailFrames
+				silent = true
 			}
-			if peak >= e.gate.Load() || e.gateTail > 0 {
-				if n, err := e.enc.Encode(frame, e.encBuf); err == nil && e.OnMicFrame != nil {
-					e.OnMicFrame(append([]byte(nil), e.encBuf[:n]...))
+		}
+
+		e.keepAlive++
+		if silent && e.keepAlive >= keepAliveFrames {
+			send, silent = true, true
+		} else if silent {
+			send = false
+		}
+
+		if send {
+			e.keepAlive = 0
+			if silent {
+				for i := range frame {
+					frame[i] = 0
 				}
+			}
+			if n, err := e.enc.Encode(frame, e.encBuf); err == nil && e.OnMicFrame != nil {
+				e.OnMicFrame(append([]byte(nil), e.encBuf[:n]...))
 			}
 		}
 		e.micAcc = append(e.micAcc[:0], e.micAcc[frameSize:]...)

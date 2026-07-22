@@ -191,31 +191,47 @@ func (u *UI) renderVoicePanel() {
 		return
 	}
 	u.voiceBox.Objects = nil
-	if u.voice == nil || u.voiceCh == "" {
+	// Панель висит, пока человек числится в канале, — в том числе когда связь
+	// отвалилась и мы её восстанавливаем. Раньше она просто исчезала, и обрыв
+	// проходил незамеченным: сидишь, говоришь, а тебя уже никто не слышит.
+	if u.voiceCh == "" {
 		u.voiceBox.Refresh()
 		return
 	}
 
+	live := u.voice != nil && u.voiceStatus == "голос подключён"
+	dotCol, textCol := colYellow, colYellow
+	if live {
+		dotCol, textCol = colGreen, colGreen
+	} else if u.voiceTries > 0 {
+		dotCol, textCol = colRed, colRed
+	}
+
 	chName, grName := u.voiceNames()
 	head := container.NewHBox(
-		txt("●", colGreen, 14, true),
-		txt(u.voiceStatus, colGreen, 12, true),
+		txt("●", dotCol, 14, true),
+		txt(u.voiceStatus, textCol, 12, true),
 	)
-	u.voiceTimer = txt("00:00", colDim, 11, false)
-	u.voicePing = newPingBars()
-	u.voicePing.set(u.voice.RTTMS())
-
 	where := txt(chName+" · "+grName, colDim, 11, false)
+
+	body := container.NewVBox(head, where)
+	if live {
+		u.voiceTimer = txt("00:00", colDim, 11, false)
+		u.voicePing = newPingBars()
+		u.voicePing.set(u.voice.RTTMS())
+		body.Add(container.NewHBox(u.voiceTimer, layoutSpacer(6), u.voicePing.box))
+	} else {
+		u.voiceTimer, u.voicePing = nil, nil
+		if u.voiceTries > 0 {
+			body.Add(txt("попытка "+itoa(u.voiceTries), colDim, 10, false))
+		}
+	}
 
 	leave := widget.NewButtonWithIcon("отключиться", theme.CancelIcon(), func() { u.leaveVoice() })
 	leave.Importance = widget.DangerImportance
+	body.Add(leave)
 
-	u.voiceBox.Add(container.NewPadded(container.NewVBox(
-		head,
-		where,
-		container.NewHBox(u.voiceTimer, layoutSpacer(6), u.voicePing.box),
-		leave,
-	)))
+	u.voiceBox.Add(container.NewPadded(body))
 	u.voiceBox.Refresh()
 }
 
@@ -240,13 +256,30 @@ func (u *UI) joinVoice(chID, name string) {
 	}
 	u.leaveVoice()
 	u.voiceCh = chID
-	u.voiceStatus = "подключаюсь…"
+	u.voiceName = name
+	u.voiceTries = 0
+	u.connectVoice()
+}
+
+// connectVoice поднимает соединение с текущим каналом. При обрыве сам зовёт
+// себя снова: из канала человека не должно выбрасывать, пока он не нажал
+// «отключиться». Единственный способ выйти — leaveVoice.
+func (u *UI) connectVoice() {
+	chID, name := u.voiceCh, u.voiceName
+	if chID == "" {
+		return
+	}
+	if u.voiceTries == 0 {
+		u.voiceStatus = "подключаюсь…"
+	} else {
+		u.voiceStatus = "переподключаюсь…"
+	}
 	u.renderVoicePanel()
 	u.renderChannels()
 
 	// mine указывает на «своё» соединение: колбэки старого клиента прилетают
-	// уже после того, как мы переключились на новый канал, и без этой проверки
-	// они бы стёрли состояние нового подключения
+	// уже после того, как мы переключились, и без этой проверки они бы стёрли
+	// состояние нового подключения
 	var mine *VoiceClient
 
 	ev := VoiceEvents{
@@ -263,15 +296,20 @@ func (u *UI) joinVoice(chID, name string) {
 				}
 				switch state {
 				case "connected":
+					reconnected := u.voiceTries > 0
+					u.voiceTries = 0
 					u.voiceStatus = "голос подключён"
 					u.audio.PlaySound(SoundConnect)
+					if reconnected {
+						u.toast("связь восстановлена")
+					}
 				case "connecting", "new":
 					u.voiceStatus = "подключаюсь…"
-				case "failed", "disconnected":
+				case "disconnected":
+					// не обрыв: ICE сам восстанавливается, ждём
+					u.voiceStatus = "связь пропала, жду…"
+				case "failed":
 					u.voiceStatus = "связь потеряна"
-					u.audio.PlaySound(SoundHangup)
-				default:
-					u.voiceStatus = state
 				}
 				u.renderVoicePanel()
 			})
@@ -279,14 +317,13 @@ func (u *UI) joinVoice(chID, name string) {
 		OnClosed: func(reason string) {
 			fyne.Do(func() {
 				if mine == nil || u.voice != mine {
-					return // это отвалилось прошлое подключение, оно уже неактуально
+					return // отвалилось прошлое подключение, оно уже неактуально
 				}
 				u.voice = nil
-				u.voiceCh = ""
-				u.voiceStatus = ""
-				u.renderVoicePanel()
-				u.renderChannels()
-				u.toast("голос отключился: " + reason)
+				if u.voiceCh == "" {
+					return // человек сам вышел — ничего не восстанавливаем
+				}
+				u.scheduleReconnect(reason)
 			})
 		},
 	}
@@ -296,15 +333,11 @@ func (u *UI) joinVoice(chID, name string) {
 		fyne.Do(func() {
 			if err != nil {
 				if u.voiceCh == chID {
-					u.voiceCh = ""
-					u.voiceStatus = ""
-					u.renderVoicePanel()
-					u.renderChannels()
+					u.scheduleReconnect(err.Error())
 				}
-				u.toast("не зашёл в «" + name + "»: " + err.Error())
 				return
 			}
-			// пока мы подключались, юзер мог уйти в другой канал
+			// пока подключались, человек мог уйти в другой канал
 			if u.voiceCh != chID {
 				vc.Close("передумал")
 				return
@@ -314,17 +347,53 @@ func (u *UI) joinVoice(chID, name string) {
 			vc.SetState(u.muted || !u.micOK, u.deafened)
 			u.renderVoicePanel()
 			u.renderChannels()
+			_ = name
 		})
 	}()
 }
 
+// scheduleReconnect ставит повтор с нарастающей паузой. Звук обрыва играем
+// один раз, чтобы при долгом отсутствии сети не пиликать каждые пару секунд.
+func (u *UI) scheduleReconnect(reason string) {
+	if u.voiceCh == "" {
+		return
+	}
+	if u.voiceTries == 0 {
+		u.audio.PlaySound(SoundHangup)
+		u.toast("связь с каналом пропала, восстанавливаю…")
+	}
+	u.voiceTries++
+
+	delay := time.Duration(u.voiceTries) * time.Second
+	if delay > 10*time.Second {
+		delay = 10 * time.Second
+	}
+	u.voiceStatus = "переподключаюсь…"
+	u.renderVoicePanel()
+	u.renderChannels()
+
+	ch := u.voiceCh
+	time.AfterFunc(delay, func() {
+		fyne.Do(func() {
+			// за время паузы человек мог выйти сам или уйти в другой канал
+			if u.voiceCh == ch && u.voice == nil {
+				u.connectVoice()
+			}
+		})
+	})
+}
+
 func (u *UI) leaveVoice() {
+	// сначала снимаем канал: по нему переподключение понимает, что выход
+	// сделан человеком, и не пытается восстановить связь
+	u.voiceCh = ""
+	u.voiceName = ""
+	u.voiceTries = 0
 	if v := u.voice; v != nil {
-		u.voice = nil // сначала снимаем «текущий», чтобы колбэк ничего не трогал
+		u.voice = nil
 		v.Close("вышел")
 		u.audio.PlaySound(SoundHangup)
 	}
-	u.voiceCh = ""
 	u.voiceStatus = ""
 	u.renderVoicePanel()
 	u.renderChannels()

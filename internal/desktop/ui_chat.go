@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	fynedesktop "fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -172,6 +173,10 @@ func (u *UI) renderHistory(chID string, msgs []hub.OutMsg) {
 	}
 	u.msgsBox.Objects = nil
 	u.msgByID = map[int64]hub.OutMsg{}
+	// вместе с виджетами выбрасываем и ссылки на их панели действий:
+	// иначе карта растёт на каждое переключение канала
+	u.msgSlots = map[int64]func(bool){}
+	u.hoveredMsg = 0
 	u.lastAuthor, u.lastTS = "", 0
 	for _, m := range msgs {
 		u.msgByID[m.ID] = m
@@ -215,11 +220,10 @@ func (u *UI) onChat(m hub.OutMsg) {
 	// в остальном уведомляем только про чужие сообщения в других каналах:
 	// пиликать на канал, который открыт прямо сейчас, — раздражает
 	if replyToMe {
-		u.app.SendNotification(fyne.NewNotification(
-			m.From.Name+" ответил тебе · "+u.chanName(m.Ch), msgPreview(m)))
+		u.notify.notify(m.From.Name+" ответил тебе · "+u.chanName(m.Ch), msgPreview(m))
 		u.audio.PlaySound(SoundReply)
 	} else if !mine && m.Ch != u.curChan {
-		u.app.SendNotification(fyne.NewNotification(m.From.Name+" · "+u.chanName(m.Ch), msgPreview(m)))
+		u.notify.notify(m.From.Name+" · "+u.chanName(m.Ch), msgPreview(m))
 		u.audio.PlaySound(SoundMessage)
 	}
 	fyne.Do(func() {
@@ -280,45 +284,66 @@ func (u *UI) msgWidget(m hub.OutMsg) fyne.CanvasObject {
 			txt(m.From.Name, hexColor(m.From.Color.Hex), 13, true),
 			txt(time.UnixMilli(m.TS).Format("15:04"), colDim, 10, false),
 		)
+		// ответ именно тебе — подписываем явно: в общей ленте это теряется
+		if m.ReplyTo != 0 {
+			if src, ok := u.msgByID[m.ReplyTo]; ok && src.From.ID == u.me.ID && m.From.ID != u.me.ID {
+				head.Add(txt("ответил тебе", colAmber, 10, true))
+			}
+		}
 		content = container.NewBorder(nil, nil,
 			container.NewVBox(u.avatar(m.From, 30)), nil,
 			container.New(&tightVBox{spacing: 1}, head, body),
 		)
 	}
 
-	// Панелька действий появляется при наведении на сообщение — как в Discord.
-	// Прятать «ответить» в правый клик неудобно: про него никто не догадывается.
-	var row *tapRow
-	actions, group := u.msgActions(m, func() bool { return row != nil && row.ShiftHeld() })
-	actions.Hide()
-	overlay := container.NewBorder(
-		container.NewHBox(layoutSpacer(1), newHoverArea(actions, func(in bool) {
-			// наведение на сами кнопки тоже держит панель открытой, иначе она
-			// пряталась ровно в момент, когда до неё доводишь курсор
-			if in {
-				group.enter()
-			} else {
-				group.leave()
-			}
-		})),
-		nil, nil, nil, nil,
-	)
+	// Панель действий живёт СПРАВА и появляется только с зажатым Shift.
+	// По наведению она мигала: заход курсора на кнопку внутри строки Fyne
+	// считает уходом со строки. Гейт по Shift эту гонку убирает совсем.
+	//
+	// Кнопки создаются лениво, при первом показе: в истории 300 сообщений, и
+	// строить каждому по две кнопки заранее — впустую занятая память.
+	slot := container.NewStack()
+	slot.Hide()
+	var built bool
 
-	row = newTapRow(container.NewStack(content, overlay), nil)
+	row := newTapRow(container.NewBorder(nil, nil, nil, slot, content), nil)
 	row.onHover = func(in bool) {
 		if in {
-			group.enter()
+			u.hoveredMsg = m.ID
+			if u.shiftHeld {
+				if !built {
+					built = true
+					slot.Add(u.msgActions(m))
+				}
+				slot.Show()
+			}
 		} else {
-			group.leave()
+			if u.hoveredMsg == m.ID {
+				u.hoveredMsg = 0
+			}
+			slot.Hide()
+		}
+	}
+	// показ/скрытие по самому Shift, пока курсор стоит на этом сообщении
+	u.msgSlots[m.ID] = func(show bool) {
+		if show {
+			if !built {
+				built = true
+				slot.Add(u.msgActions(m))
+			}
+			slot.Show()
+		} else {
+			slot.Hide()
 		}
 	}
 	row.onSecondary = func(pos fyne.Position) { u.msgMenu(m, pos) }
 	return row
 }
 
-// msgActions — кнопки над сообщением: ответить и (для своих) удалить.
-// shiftHeld позволяет удалить без подтверждения — привычка из Discord.
-func (u *UI) msgActions(m hub.OutMsg, shiftHeld func() bool) (*fyne.Container, *hoverGroup) {
+// msgActions — кнопки справа от сообщения: ответить и (для своих) удалить.
+// Показываются только с зажатым Shift, поэтому подтверждение на удаление уже
+// не нужно: случайно нажать нельзя.
+func (u *UI) msgActions(m hub.OutMsg) fyne.CanvasObject {
 	bg := canvas.NewRectangle(colInput)
 	bg.CornerRadius = 6
 	bg.StrokeColor = colLine
@@ -336,21 +361,11 @@ func (u *UI) msgActions(m hub.OutMsg, shiftHeld func() bool) (*fyne.Container, *
 
 	// удалять можно только свои сообщения — чужие не трогаем даже владельцу
 	if m.From.ID == u.me.ID {
-		del := widget.NewButtonWithIcon("", iconTrash, func() { u.deleteMsg(m, shiftHeld()) })
+		del := widget.NewButtonWithIcon("", iconTrash, func() { u.deleteMsg(m, true) })
 		del.Importance = widget.LowImportance
 		btns.Add(del)
 	}
-
-	box := container.NewStack(bg, btns)
-	group := &hoverGroup{}
-	group.apply = func(show bool) {
-		if show {
-			box.Show()
-		} else {
-			box.Hide()
-		}
-	}
-	return box, group
+	return container.NewStack(bg, btns)
 }
 
 // deleteMsg: с зажатым Shift удаляем сразу, без вопроса.
@@ -376,6 +391,7 @@ func (u *UI) onMsgDeleted(chID string, id int64) {
 			return
 		}
 		delete(u.msgByID, id)
+		delete(u.msgSlots, id)
 		if u.replyTo == id {
 			u.replyTo = 0
 			u.renderReplyBar()
@@ -384,21 +400,29 @@ func (u *UI) onMsgDeleted(chID string, id int64) {
 	})
 }
 
-// quoteLine — строка «на что отвечаем» над самим сообщением.
+// quoteLine — блок «на что отвечаем». Раньше это была бледная строчка, и
+// по ленте было вообще не понять, что кто-то кому-то ответил. Теперь это
+// заметная плашка: стрелка, цветной ник автора и сам текст.
 func (u *UI) quoteLine(id int64) fyne.CanvasObject {
 	src, ok := u.msgByID[id]
-	name, preview := "сообщение", "недоступно"
+	name, preview := "сообщение", "удалено"
 	var nameCol color.Color = colDim
 	if ok {
 		name, preview = src.From.Name, shorten(msgPreview(src), 60)
 		nameCol = hexColor(src.From.Color.Hex)
 	}
-	bar := canvas.NewRectangle(colLine)
-	return container.NewBorder(nil, nil, sized(2, 14, bar), nil,
-		container.NewHBox(
-			txt(name, nameCol, 11, true),
-			txt(preview, colDim, 11, false),
-		))
+
+	bg := canvas.NewRectangle(colInput)
+	bg.CornerRadius = 5
+	bar := canvas.NewRectangle(nameCol)
+
+	line := container.NewHBox(
+		txt("↪", colDim, 12, true),
+		txt(name, nameCol, 11, true),
+		txt(preview, colDim, 11, false),
+	)
+	return container.NewStack(bg,
+		container.NewBorder(nil, nil, sized(3, 16, bar), nil, container.NewPadded(line)))
 }
 
 func (u *UI) msgMenu(m hub.OutMsg, pos fyne.Position) {
@@ -628,3 +652,43 @@ func (u *UI) upload(name string, data []byte) {
 }
 
 var _ = fmt.Sprintf
+
+/* ---------- Shift: показ действий сообщения ---------- */
+
+// watchShift следит за клавишей Shift на уровне окна. Действия сообщения
+// показываются только с ней: по одному наведению панель мигала, потому что
+// заход курсора на кнопку внутри строки Fyne считает уходом со строки.
+func (u *UI) watchShift() {
+	cv, ok := u.win.Canvas().(fynedesktop.Canvas)
+	if !ok {
+		return // не десктопный драйвер — оставляем панель по наведению
+	}
+	isShift := func(k *fyne.KeyEvent) bool {
+		return k.Name == fynedesktop.KeyShiftLeft || k.Name == fynedesktop.KeyShiftRight
+	}
+	cv.SetOnKeyDown(func(k *fyne.KeyEvent) {
+		if isShift(k) {
+			u.setShift(true)
+		}
+	})
+	cv.SetOnKeyUp(func(k *fyne.KeyEvent) {
+		if isShift(k) {
+			u.setShift(false)
+		}
+	})
+}
+
+// setShift переключает панель только у сообщения под курсором — перебирать
+// всю ленту на каждое нажатие Shift незачем.
+func (u *UI) setShift(on bool) {
+	if u.shiftHeld == on {
+		return
+	}
+	u.shiftHeld = on
+	if u.hoveredMsg == 0 {
+		return
+	}
+	if toggle, ok := u.msgSlots[u.hoveredMsg]; ok {
+		toggle(on)
+	}
+}

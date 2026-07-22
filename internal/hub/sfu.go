@@ -37,6 +37,17 @@ func newWebRTCAPI(cfg *config.Config) (*webrtc.API, error) {
 		webrtc.NetworkTypeTCP4, webrtc.NetworkTypeTCP6,
 	})
 	se.SetIncludeLoopbackCandidate(true) // для локального теста на 127.0.0.1
+
+	// Дефолты Pion слишком строгие для живого интернета: 5 секунд тишины —
+	// уже «disconnected», 25 — «failed» и участник вылетает из канала.
+	// У человека с вайфаем или мобильным такое бывает регулярно, а он этого
+	// даже не замечает. Даём минуту на восстановление и чаще шлём keepalive,
+	// чтобы NAT не закрывал сопоставление, пока никто не говорит.
+	se.SetICETimeouts(
+		15*time.Second, // disconnected: короткие провалы связи не считаем обрывом
+		60*time.Second, // failed: только после минуты реально считаем связь мёртвой
+		2*time.Second,  // keepalive: держим NAT открытым
+	)
 	if cfg.PublicIP != "" {
 		// подменяем локальный адрес в кандидатах на публичный IP сервера
 		if err := se.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
