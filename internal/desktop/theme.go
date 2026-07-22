@@ -140,21 +140,10 @@ type tapRow struct {
 	content     fyne.CanvasObject
 	onTap       func()
 	onSecondary func(fyne.Position)
-	onHover     func(bool)
 	active      bool
 	hover       bool
 	bg          *canvas.Rectangle
-
-	// последний зажатый модификатор: Fyne не передаёт его в Tapped, поэтому
-	// запоминаем на нажатии кнопки мыши (нужно для shift-клика)
-	lastMod fyne.KeyModifier
 }
-
-func (r *tapRow) MouseDown(e *fynedesktop.MouseEvent) { r.lastMod = e.Modifier }
-func (r *tapRow) MouseUp(*fynedesktop.MouseEvent)     {}
-
-// ShiftHeld — был ли зажат Shift в момент последнего клика.
-func (r *tapRow) ShiftHeld() bool { return r.lastMod&fyne.KeyModifierShift != 0 }
 
 func newTapRow(content fyne.CanvasObject, onTap func()) *tapRow {
 	r := &tapRow{content: content, onTap: onTap, bg: canvas.NewRectangle(color.Transparent)}
@@ -199,21 +188,8 @@ func (r *tapRow) TappedSecondary(e *fyne.PointEvent) {
 	}
 }
 
-func (r *tapRow) MouseIn(*fynedesktop.MouseEvent) {
-	r.hover = true
-	r.applyBG()
-	if r.onHover != nil {
-		r.onHover(true)
-	}
-}
-
-func (r *tapRow) MouseOut() {
-	r.hover = false
-	r.applyBG()
-	if r.onHover != nil {
-		r.onHover(false)
-	}
-}
+func (r *tapRow) MouseIn(*fynedesktop.MouseEvent)    { r.hover = true; r.applyBG() }
+func (r *tapRow) MouseOut()                          { r.hover = false; r.applyBG() }
 func (r *tapRow) MouseMoved(*fynedesktop.MouseEvent) {}
 func (r *tapRow) Cursor() fynedesktop.Cursor         { return fynedesktop.PointerCursor }
 

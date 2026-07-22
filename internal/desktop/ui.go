@@ -90,12 +90,9 @@ type UI struct {
 	gateMeter *canvas.Rectangle // полоска уровня в настройках (nil — окно закрыто)
 
 	// чат
-	shiftHeld  bool                 // зажат Shift — показываем действия сообщения
-	hoveredMsg int64                // над каким сообщением сейчас курсор
-	msgSlots   map[int64]func(bool) // переключатели панелей действий
-	replyBar   *fyne.Container
-	replyTo    int64                // id сообщения, на которое отвечаем
-	msgByID    map[int64]hub.OutMsg // для показа цитаты в ответах
+	replyBar *fyne.Container
+	replyTo  int64                // id сообщения, на которое отвечаем
+	msgByID  map[int64]hub.OutMsg // для показа цитаты в ответах
 
 	// склейка подряд идущих сообщений одного автора
 	lastAuthor string
@@ -131,7 +128,6 @@ func Run() {
 		avChannels: map[string][]*avatarView{},
 		avMembers:  map[string][]*avatarView{},
 		msgByID:    map[int64]hub.OutMsg{},
-		msgSlots:   map[int64]func(bool){},
 	}
 
 	audio, err := NewAudioEngine()

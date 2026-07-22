@@ -65,7 +65,6 @@ func (u *UI) buildShell() {
 
 	// перетаскивание картинок прямо в окно — самый быстрый способ кинуть скрин
 	u.win.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) { u.dropFiles(uris) })
-	u.watchShift()
 }
 
 func (u *UI) renderAll() {
