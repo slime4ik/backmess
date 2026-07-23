@@ -128,9 +128,15 @@ func (u *UI) showAudioSettings() {
 		u.audio.PlaySound(SoundJoin)
 	})
 
-	// Чувствительность — это порог, ниже которого микрофон не передаёт вообще.
-	// Живая полоска под ним показывает текущий уровень: видно, где проходит
-	// дыхание и шум вентилятора, а где начинается собственно речь.
+	// Шумоподавление: чистит голос от постоянного фона (вентилятор, гул).
+	dnCheck := widget.NewCheck("шумоподавление", func(on bool) {
+		u.audio.SetDenoise(on)
+		u.app.Preferences().SetBool("denoise", on)
+	})
+	dnCheck.SetChecked(u.audio.Denoise())
+
+	// Ручной порог: полоска + подсказка + живой уровень. Показывается только
+	// когда авто выключен.
 	gateHint := txt("", colDim, 10, false)
 	setHint := func(v float64) {
 		switch {
@@ -162,14 +168,37 @@ func (u *UI) showAudioSettings() {
 	meter := container.NewStack(meterBG,
 		container.NewBorder(nil, nil, nil, layoutSpacer(1), sized(0, 6, u.gateMeter)))
 
+	// ручной блок скрывается целиком в авторежиме
+	manualBox := container.NewVBox(
+		gateBox, gateHint,
+		txt("текущий уровень:", colDim, 10, false),
+		sized(0, 6, meter),
+	)
+
+	// Авто-порог: приложение само держит порог чуть выше фона. По умолчанию
+	// включён — большинству ручной порог настраивать не хочется.
+	autoCheck := widget.NewCheck("автоматически подбирать порог", func(on bool) {
+		u.audio.SetAutoGate(on)
+		u.app.Preferences().SetBool("autogate", on)
+		if on {
+			manualBox.Hide()
+		} else {
+			manualBox.Show()
+		}
+	})
+	autoCheck.SetChecked(u.audio.AutoGate())
+	if u.audio.AutoGate() {
+		manualBox.Hide()
+	}
+
 	content := container.NewVBox(
 		txt("МИКРОФОН", colDim, 11, true), micSel,
 		txt("НАУШНИКИ / ДИНАМИКИ", colDim, 11, true), outSel,
 		widget.NewSeparator(),
-		gateBox,
-		gateHint,
-		txt("текущий уровень:", colDim, 10, false),
-		sized(0, 6, meter),
+		txt("ОБРАБОТКА ГОЛОСА", colDim, 11, true),
+		dnCheck,
+		autoCheck,
+		manualBox,
 		widget.NewSeparator(),
 		test,
 		status,
@@ -177,7 +206,7 @@ func (u *UI) showAudioSettings() {
 	)
 	d := dialog.NewCustom("звук", "закрыть", content, u.win)
 	d.SetOnClosed(func() { u.gateMeter = nil })
-	d.Resize(fyne.NewSize(440, 520))
+	d.Resize(fyne.NewSize(440, 560))
 	d.Show()
 }
 

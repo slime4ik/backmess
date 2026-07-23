@@ -10,6 +10,7 @@ import (
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/slime4ik/backmess/internal/auth"
@@ -107,7 +108,7 @@ func Run() {
 	fyneapp.SetMetadata(fyne.AppMetadata{
 		ID:         "dev.djaploy.mess",
 		Name:       "mess",
-		Version:    "0.1.0",
+		Version:    appVersion,
 		Build:      1,
 		Migrations: map[string]bool{"fyneDo": true},
 	})
@@ -146,6 +147,8 @@ func Run() {
 	}
 	u.micOK = audio.StartCapture(a.Preferences().String("mic")) == nil
 	audio.SetGate(a.Preferences().FloatWithFallback("gate", 0.02))
+	audio.SetAutoGate(a.Preferences().BoolWithFallback("autogate", true))
+	audio.SetDenoise(a.Preferences().BoolWithFallback("denoise", true))
 
 	// сохранённая сессия? — продлеваем через /api/refresh, а не просто /api/me,
 	// чтобы токен не протухал, пока юзер время от времени запускает приложение
@@ -251,6 +254,7 @@ func (u *UI) showLogin(errText string) {
 func (u *UI) start(api *API) {
 	u.api = api
 	u.notify = newNotifier(u.app)
+	go u.checkUpdateOnce()
 	u.images = newImageCache(api, 48) // 48 МБ на все картинки — дальше вытесняем старые
 	u.buildShell()
 	u.gw = NewGateway(api, GatewayEvents{
@@ -459,4 +463,29 @@ func (u *UI) openChannel(chID string) {
 	u.renderRail() // непрочитанное могло погаснуть — обновляем значок группы
 	u.renderChatArea()
 	u.gw.RequestHistory(chID)
+}
+
+// checkUpdateOnce тихо спрашивает GitHub про свежий релиз и, если он новее,
+// один раз показывает ненавязчивую плашку со ссылкой. Ошибки сети игнорируем.
+func (u *UI) checkUpdateOnce() {
+	latest, newer := checkUpdate()
+	if !newer {
+		return
+	}
+	fyne.Do(func() {
+		link, err := url.Parse(releasesPage)
+		body := container.NewVBox(
+			txt("Вышла новая версия mess", colText, 15, true),
+			txt("у тебя "+appVersion+", доступна "+latest, colDim, 12, false),
+		)
+		if err == nil {
+			open := widget.NewButton("скачать", func() { u.app.OpenURL(link) })
+			open.Importance = widget.HighImportance
+			body.Add(open)
+		}
+		body.Add(txt(releasesPage, colDim, 10, false))
+		d := dialog.NewCustom("обновление", "позже", body, u.win)
+		d.Resize(fyne.NewSize(360, 220))
+		d.Show()
+	})
 }

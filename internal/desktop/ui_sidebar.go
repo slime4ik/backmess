@@ -222,8 +222,16 @@ func (u *UI) channelRow(g hub.GroupView, c *channelRef) fyne.CanvasObject {
 		dot := canvas.NewCircle(colAmber)
 		line.Add(sized(7, 7, dot))
 	}
-	if c.Kind == "voice" && c.ID == u.voiceCh {
-		line.Add(txt("ты тут", colGreen, 10, true))
+	// количество сидящих в голосовом канале — видно, не заходя внутрь;
+	// свой канал подсвечен зелёным
+	if c.Kind == "voice" {
+		if n := len(g.Voice[c.ID]); n > 0 {
+			col := colDim
+			if c.ID == u.voiceCh {
+				col = colGreen
+			}
+			line.Add(txt(fmt.Sprintf("%d", n), col, 10, true))
+		}
 	}
 
 	row := newTapRow(container.NewPadded(line), func() {

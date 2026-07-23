@@ -40,9 +40,14 @@ type AudioEngine struct {
 	muted  atomic.Bool
 	deaf   atomic.Bool
 
-	gate      atomic.Int32 // порог чувствительности микрофона в единицах пика
-	gateTail  int          // сколько кадров ещё пропускать после спада уровня
-	keepAlive int          // кадров прошло с последней отправки
+	gate       atomic.Int32 // ручной порог чувствительности в единицах пика
+	autoGate   atomic.Bool  // авто-порог по уровню фона
+	noiseFloor float64      // оценка фона для авто-порога (только из onCapture)
+	gateTail   int          // сколько кадров ещё пропускать после спада уровня
+	keepAlive  int          // кадров прошло с последней отправки
+
+	dnMu    sync.Mutex
+	denoise *denoiser // шумоподавление; nil = выключено
 
 	// OnMicFrame вызывается из аудио-потока: копия кадра уже сделана
 	OnMicFrame func(data []byte)
@@ -65,12 +70,14 @@ type audioSource struct {
 	vol    atomic.Int32 // громкость в процентах, 100 = как есть
 }
 
+// vol хранит громкость+1 в процентах: 0 в atomic значит «не задано» → 100%,
+// а осознанный ноль (полная тишина) кодируется как 1 → 0%.
 func (s *audioSource) volume() float64 {
 	v := s.vol.Load()
 	if v == 0 {
-		return 1
+		return 1 // по умолчанию как есть
 	}
-	return float64(v) / 100
+	return float64(v-1) / 100
 }
 
 func NewAudioEngine() (*AudioEngine, error) {
@@ -237,9 +244,8 @@ func peak16(pcm []int16) int32 {
 	return p
 }
 
-// Gate — порог чувствительности микрофона (0..1 от максимума). Всё тише порога
-// не кодируется и не уходит в сеть: это и шумодав, и экономия — тишина не жуёт
-// ни процессор на кодирование, ни канал.
+// Gate — ручной порог чувствительности микрофона (0..1 от максимума). Всё тише
+// порога не кодируется и не уходит в сеть: это и шумодав, и экономия.
 func (e *AudioEngine) SetGate(v float64) {
 	if v < 0 {
 		v = 0
@@ -252,11 +258,71 @@ func (e *AudioEngine) SetGate(v float64) {
 
 func (e *AudioEngine) Gate() float64 { return float64(e.gate.Load()) / 32768 }
 
+// SetAutoGate включает автоматический порог: приложение само оценивает уровень
+// фона и ставит порог чуть выше него. Ручной ползунок при этом не нужен.
+func (e *AudioEngine) SetAutoGate(on bool) { e.autoGate.Store(on) }
+func (e *AudioEngine) AutoGate() bool      { return e.autoGate.Load() }
+
+// SetDenoise включает/выключает шумоподавление. Денойзер создаётся лениво и
+// живёт, пока включён; выключение освобождает его буферы.
+func (e *AudioEngine) SetDenoise(on bool) {
+	e.dnMu.Lock()
+	defer e.dnMu.Unlock()
+	if on && e.denoise == nil {
+		e.denoise = newDenoiser()
+	} else if !on {
+		e.denoise = nil
+	}
+}
+
+func (e *AudioEngine) Denoise() bool {
+	e.dnMu.Lock()
+	defer e.dnMu.Unlock()
+	return e.denoise != nil
+}
+
+// threshold возвращает актуальный порог в единицах пика. В ручном режиме — то,
+// что выставил юзер. В авто — фон, который отслеживается по тихим кадрам:
+// быстро вниз (сразу видим, что стало тише), медленно вверх (не считаем
+// собственную речь за фон), плюс множитель, чтобы речь уверенно превышала порог.
+func (e *AudioEngine) threshold(peak int32, muted bool) int32 {
+	if !e.autoGate.Load() {
+		return e.gate.Load()
+	}
+	fp := float64(peak)
+	if fp < e.noiseFloor {
+		e.noiseFloor = 0.6*e.noiseFloor + 0.4*fp
+	} else if !muted {
+		e.noiseFloor = 0.999*e.noiseFloor + 0.001*fp
+	}
+	thr := e.noiseFloor*2.5 + 250 // небольшой абсолютный минимум против полной тишины
+	if thr > 32768 {
+		thr = 32768
+	}
+	return int32(thr)
+}
+
 func (e *AudioEngine) onCapture(_, in []byte, _ uint32) {
 	e.micAcc = append(e.micAcc, s16(in)...)
 	for len(e.micAcc) >= frameSize {
 		frame := e.micAcc[:frameSize]
 		muted := e.muted.Load()
+
+		// Шумоподавление — до всего остального, чтобы и порог, и уровень видели
+		// уже очищенный звук. Обработчик и решение вкл/выкл берём под локом
+		// один раз: их могут менять из UI.
+		if !muted {
+			e.dnMu.Lock()
+			dn := e.denoise
+			e.dnMu.Unlock()
+			if dn != nil {
+				cleaned := dn.Process(frame)
+				copy(frame, cleaned)
+			}
+		}
+
+		peak := peak16(frame)
+		thr := e.threshold(peak, muted)
 
 		// Решаем, отправлять ли кадр. Пока человек молчит (или сидит в муте),
 		// звук не кодируется и не уходит в сеть — это и шумодав, и экономия
@@ -273,8 +339,8 @@ func (e *AudioEngine) onCapture(_, in []byte, _ uint32) {
 			e.micLvl.Store(0)
 			e.gateTail = 0
 			silent = true
-		case peak16(frame) >= e.gate.Load():
-			e.micLvl.Store(peak16(frame))
+		case peak >= thr:
+			e.micLvl.Store(peak)
 			e.gateTail = gateTailFrames
 			send = true
 		default:
@@ -372,8 +438,15 @@ func (s *audioSource) mixInto(acc []int32) {
 		if n > need-got {
 			n = need - got
 		}
-		for i := 0; i < n; i++ {
-			acc[got+i] += int32(s.rem[i])
+		vol := s.volume()
+		if vol == 1 {
+			for i := 0; i < n; i++ {
+				acc[got+i] += int32(s.rem[i])
+			}
+		} else {
+			for i := 0; i < n; i++ {
+				acc[got+i] += int32(float64(s.rem[i]) * vol)
+			}
 		}
 		s.rem = s.rem[n:]
 		got += n
@@ -395,7 +468,7 @@ func (e *AudioEngine) Ingest(id string, payload []byte) {
 		}
 		src = &audioSource{dec: dec, frames: make(chan []int16, 8), pcm: make([]int16, maxFrame)}
 		if v, ok := e.userVol[id]; ok {
-			src.vol.Store(int32(v))
+			src.vol.Store(int32(v + 1)) // +1: см. audioSource.volume
 		}
 		e.sources[id] = src
 	}
@@ -416,10 +489,13 @@ func (e *AudioEngine) Ingest(id string, payload []byte) {
 // SetUserVolume — индивидуальная громкость участника в процентах (100 = обычная).
 // Хранится вместе с источником, применяется прямо в микшере.
 func (e *AudioEngine) SetUserVolume(id string, percent int) {
+	if percent < 0 {
+		percent = 0
+	}
 	e.mu.Lock()
 	e.userVol[id] = percent
 	if src := e.sources[id]; src != nil {
-		src.vol.Store(int32(percent))
+		src.vol.Store(int32(percent + 1)) // +1: см. audioSource.volume
 	}
 	e.mu.Unlock()
 }
